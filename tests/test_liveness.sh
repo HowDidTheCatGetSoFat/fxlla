@@ -88,18 +88,35 @@ fi
 
 # server_alive must still say yes for a real engine process, or `fxlla off` and
 # the keep-warm watchdog would stop seeing a server they are meant to manage.
-# Both engine names have to be accepted - gguf models run llama-server, MLX
-# ones mlx_lm.server - so check the pattern against each.
-for engine in llama-server mlx_lm.server; do
-  if printf '%s\n' "/usr/local/bin/$engine --model /x --port 8080" | grep -qE -- 'llama-server|mlx_lm\.server'; then
-    pass "the engine pattern accepts $engine"
+# All three engine command lines have to be accepted - gguf models run
+# llama-server, MLX ones mlx_lm.server, OMLX ones `omlx serve` - so check the
+# pattern (the same one server_alive uses) against a realistic command for each.
+_engine_pat='llama-server|mlx_lm\.server|omlx-server|omlx serve'
+while IFS='|' read -r label cmd; do
+  [ -n "$label" ] || continue
+  if printf '%s\n' "$cmd" | grep -qE -- "$_engine_pat"; then
+    pass "the engine pattern accepts $label"
   else
-    fail "the engine pattern rejects $engine, so a running server would look stopped"
+    fail "the engine pattern rejects $label, so a running server would look stopped"
   fi
-done
+done <<'EOF'
+llama-server|/usr/local/bin/llama-server --model /x --port 8080
+mlx_lm.server|/opt/venv/bin/python -m mlx_lm.server --model /x --port 8080
+omlx serve (argv)|/opt/omlx/.venv/bin/omlx serve --model-dir /x --port 8080
+omlx-server (setproctitle)|omlx-server
+EOF
+
+# The anchors are `omlx-server` and `omlx serve`, not a bare `omlx`, precisely so
+# a path that merely contains the word - the console script installs under an
+# `omlx` directory - does not read as a running server.
+if printf '%s\n' "/Users/x/omlx-src/bin/python -m http.server 9000" | grep -qE -- "$_engine_pat"; then
+  fail "a process under an omlx path but not running 'omlx serve' false-matched"
+else
+  pass "a process under an omlx path but not running 'omlx serve' is not matched"
+fi
 
 printf '\n%s\n' "-----"
-EXPECTED=9
+EXPECTED=12
 if [ "$ran" -ne "$EXPECTED" ]; then
   printf 'FAIL - ran %d assertions, expected %d (the file did not finish)\n' "$ran" "$EXPECTED"
   exit 1

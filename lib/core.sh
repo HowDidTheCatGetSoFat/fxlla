@@ -305,7 +305,7 @@ resolve_repo() {
   return 1
 }
 
-# alias -> engine (mlx|gguf). Defaults to mlx.
+# alias -> engine (mlx|gguf|omlx). Defaults to mlx.
 resolve_engine() {
   local e; e="$(_catalog_field "$1" 5 2>/dev/null || true)"
   echo "${e:-}"
@@ -436,9 +436,13 @@ _pid_is() {
 }
 
 server_pid()   { [ -f "$PID_FILE" ] && cat "$PID_FILE" 2>/dev/null || true; }
-# Either engine can be behind this pid: gguf models run llama-server, MLX ones
-# mlx_lm.server.
-server_alive() { _pid_is "$(server_pid)" 'llama-server|mlx_lm\.server'; }
+# Any of the three engines can be behind this pid: gguf models run llama-server,
+# MLX ones mlx_lm.server, OMLX ones `omlx serve`. omlx calls setproctitle, so a
+# running instance shows as `omlx-server` (verified against a live one) rather
+# than its argv - but the title is only set if the setproctitle package is
+# present, so match the argv `omlx serve` too. Neither substring appears in a
+# mere path under an `omlx` directory, which is the false match to avoid.
+server_alive() { _pid_is "$(server_pid)" 'llama-server|mlx_lm\.server|omlx-server|omlx serve'; }
 
 gateway_pid()   { [ -f "$GATEWAY_PID" ] && cat "$GATEWAY_PID" 2>/dev/null || true; }
 gateway_alive() { _pid_is "$(gateway_pid)" 'fxlla_gateway\.py'; }

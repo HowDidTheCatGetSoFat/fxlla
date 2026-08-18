@@ -145,6 +145,17 @@ cmd_setup() {
     info "Installing llama.cpp (for GGUF models)..."; brew install llama.cpp
   fi
 
+  # omlx is an OPTIONAL third engine (continuous batching + an SSD KV cache that
+  # survives a restart). It is not installed here on purpose: its build pins
+  # mlx==0.32.0 and would fight the mlx the MLX engine uses if dropped in the
+  # same environment. Install it isolated when you want it:
+  #   brew tap jundot/omlx https://github.com/jundot/omlx && brew install jundot/omlx/omlx
+  if command -v omlx >/dev/null 2>&1; then
+    ok "omlx already installed (OMLX engine)"
+  else
+    info "omlx not installed (optional). For OMLX models: brew tap jundot/omlx https://github.com/jundot/omlx && brew install jundot/omlx/omlx"
+  fi
+
   [ "$media" = 1 ] && _setup_media
 
   local uvbin="$HOME/.local/bin"
@@ -347,6 +358,7 @@ cmd_pull() {
     case "$1" in
       --gguf)         engine=gguf ;;
       --mlx)          engine=mlx ;;
+      --omlx)         engine=omlx ;;
       --quant)        quant="$2"; shift ;;
       --quant=*)      quant="${1#--quant=}" ;;
       --downloader)   downloader="$2"; shift ;;
@@ -356,7 +368,7 @@ cmd_pull() {
       *)              q="$1" ;;
     esac; shift
   done
-  [ -z "$q" ] && die "Usage: fxlla pull <alias|org/repo|civitai:<id>|media:<alias>> [--gguf] [--quant Q4_K_M] [--downloader aria2|hf] [--yes|-y]"
+  [ -z "$q" ] && die "Usage: fxlla pull <alias|org/repo|civitai:<id>|media:<alias>> [--gguf|--mlx|--omlx] [--quant Q4_K_M] [--downloader aria2|hf] [--yes|-y]"
   case "$downloader" in aria2|hf) ;; *) die "unknown downloader: $downloader (aria2|hf)" ;; esac
   [ "$downloader" = hf ] || need aria2c
 
@@ -478,7 +490,11 @@ cmd_pull() {
   if [ "$engine" = gguf ]; then
     echo "gguf" > "$dest/.engine"; basename "$entry" > "$dest/.entry"
   else
-    echo "mlx" > "$dest/.engine"
+    # Was a hardcoded "mlx", which silently mislabelled anything that is not
+    # gguf: a --omlx pull wrote mlx here and every reader then launched
+    # mlx_lm.server on an omlx directory. Engine is non-empty by now (defaulted
+    # above), so echo what was actually resolved.
+    echo "$engine" > "$dest/.engine"
   fi
 
   if [ "$downloader" = hf ]; then
@@ -1159,6 +1175,42 @@ cmd_backend() {
     # repo ships both - the projector is small and it is the better one.
     # shellcheck disable=SC2046,SC2086  # the derived flags are meant to split
     exec llama-server --model "$dest/$entry" --alias "$name" --host 127.0.0.1 --port "$port" -ngl "$FXLLA_NGL" $(_llama_flags "$dest") --jinja $FXLLA_SERVER_ARGS
+  elif [ "$engine" = omlx ]; then
+    # omlx often lives in a venv rather than on PATH (its build pins mlx 0.32.0,
+    # so it is kept isolated). FXLLA_OMLX_BIN points at that binary; command -v
+    # accepts an absolute path, so `need` still validates it.
+    local omlx_bin="${FXLLA_OMLX_BIN:-omlx}"
+    need "$omlx_bin"
+    # omlx serves the ONE model in --model-dir when the dir is itself a model
+    # (config.json at the root, no model subdirs): discover_models registers it
+    # under the directory basename, which is exactly "$name", so the gateway
+    # sends the bare alias as the model field (see model_field_from). Three
+    # flags are not optional here:
+    #   --memory-guard off  omlx's own guard sizes a ceiling from total machine
+    #     RAM with no view of the sibling backends the gateway also runs, so it
+    #     would second-guess the gateway's budget and reject prefills it had
+    #     already admitted. The gateway owns memory; omlx must not also.
+    #   --base-path         omlx's settings.json is a non-atomic rewrite and its
+    #     SSD prefix cache is thread- not process-safe, so every concurrent
+    #     backend needs its own state dir or they race the shared ~/.omlx.
+    #   --no-hf-cache       omlx otherwise enumerates the whole Hugging Face
+    #     cache into /v1/models alongside our one model (measured). fxlla routes
+    #     by the alias so it never mattered for correctness, but it is noise the
+    #     gateway should not see - keep omlx to the model we handed it.
+    # The SSD prefix cache is the reason to reach for omlx at all: a reused
+    # prefix is restored from disk instead of a 60-80s recompute, and it
+    # survives the backend being unloaded. Passed EXPLICITLY rather than left to
+    # a default: omlx's help calls --paged-ssd-cache-dir the flag that "enables"
+    # the cache, so naming it removes any doubt the feature is on.
+    local base="${FXLLA_OMLX_BASE:-$MODELS_DIR/.omlx/$name}"
+    # shellcheck disable=SC2086
+    exec "$omlx_bin" serve --model-dir "$dest" --host 127.0.0.1 --port "$port" \
+      --base-path "$base" \
+      --memory-guard off \
+      --no-hf-cache \
+      --paged-ssd-cache-dir "$base/cache" \
+      --paged-ssd-cache-max-size "${FXLLA_OMLX_CACHE_MAX:-20GB}" \
+      $FXLLA_SERVER_ARGS
   else
     # shellcheck disable=SC2086
     exec mlx_lm.server --model "$dest" --host 127.0.0.1 --port "$port" $FXLLA_SERVER_ARGS
@@ -1291,6 +1343,7 @@ cmd_on() {
     case "$1" in
       --mlx) force_engine=mlx ;;
       --gguf) force_engine=gguf ;;
+      --omlx) force_engine=omlx ;;
       --pull) do_pull=1 ;;
       --yes|-y) assume=1 ;;
       -*) die "unknown flag: $1" ;;
@@ -1337,6 +1390,23 @@ cmd_on() {
       $(_llama_flags "$dest") --jinja \
       $FXLLA_SERVER_ARGS > "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
+  elif [ "$engine" = omlx ]; then
+    local omlx_bin="${FXLLA_OMLX_BIN:-omlx}"
+    need "$omlx_bin"
+    info "Starting $name (omlx) at $BASE_URL ..."
+    # Mirrors cmd_backend's omlx launch; see the rationale for the flags there.
+    # This second launch site has drifted from cmd_backend before, so keep the
+    # two in step.
+    local base="${FXLLA_OMLX_BASE:-$MODELS_DIR/.omlx/$name}"
+    # shellcheck disable=SC2086
+    nohup "$omlx_bin" serve --model-dir "$dest" --host "$FXLLA_HOST" --port "$FXLLA_PORT" \
+      --base-path "$base" \
+      --memory-guard off \
+      --no-hf-cache \
+      --paged-ssd-cache-dir "$base/cache" \
+      --paged-ssd-cache-max-size "${FXLLA_OMLX_CACHE_MAX:-20GB}" \
+      $FXLLA_SERVER_ARGS > "$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
   else
     need mlx_lm.server
     info "Starting $name (mlx) at $BASE_URL ..."
@@ -1355,6 +1425,7 @@ cmd_on() {
   local id
   case "$engine" in
     gguf) id="$name" ;;
+    omlx) id="$name" ;;   # omlx serves the model under its directory basename
     *)    id="$dest" ;;
   esac
   for _ in $(seq 1 90); do
@@ -1590,6 +1661,7 @@ cmd_doctor() {
   done
   if command -v mlx_lm.server >/dev/null 2>&1; then _chk ok "mlx_lm.server (MLX engine)"; else _chk warn "mlx_lm.server missing (MLX; run: fxlla setup)"; fi
   if command -v llama-server >/dev/null 2>&1; then _chk ok "llama-server (GGUF engine)"; else _chk warn "llama-server missing (GGUF; run: fxlla setup)"; fi
+  if command -v "${FXLLA_OMLX_BIN:-omlx}" >/dev/null 2>&1; then _chk ok "omlx (OMLX engine, optional): ${FXLLA_OMLX_BIN:-omlx}"; else _chk warn "omlx not found (optional 3rd engine, SSD KV cache). Install, or set FXLLA_OMLX_BIN to its venv path"; fi
 
   info "Environment"
   if echo ":$PATH:" | grep -q ":$HOME/.local/bin:"; then _chk ok "$HOME/.local/bin on PATH"; else _chk warn "$HOME/.local/bin not on PATH (add it to your shell rc)"; fi

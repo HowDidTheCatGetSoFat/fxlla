@@ -72,6 +72,29 @@ else
   fail "a quant matching only a projector is refused"
 fi
 
+# --- the .engine marker records the engine that was resolved ----------------
+# The non-gguf branch used to write a hardcoded "mlx", so a `--omlx` pull (or a
+# catalog row with engine=omlx) landed on disk marked mlx, and every reader then
+# launched mlx_lm.server on an omlx directory. The fix echoes $engine, which is
+# non-empty by that point. Source-level, like the projector checks above: the
+# behaviour is verified by a real pull, this pins the shape a careless edit undoes.
+if grep -q 'echo "\$engine" > "\$dest/.engine"' "$FXLLA"; then
+  pass "the .engine marker is written from the resolved engine"
+else
+  fail "the .engine marker is written from the resolved engine"
+fi
+if grep -q 'echo "mlx" > "\$dest/.engine"' "$FXLLA"; then
+  fail "the .engine marker still hardcodes mlx (a --omlx pull would be mislabelled)"
+else
+  pass "the .engine marker no longer hardcodes mlx"
+fi
+# --omlx is a real engine flag, parsed the way --gguf/--mlx are.
+if grep -q -- '--omlx)         engine=omlx' "$FXLLA"; then
+  pass "pull accepts --omlx"
+else
+  fail "pull accepts --omlx"
+fi
+
 # --- every aria2 invocation carries the stall guard -------------------------
 # aria2 defaults --lowest-speed-limit to 0, which means it never abandons a
 # connection that has stopped delivering - and a socket that stays OPEN while

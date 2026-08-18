@@ -901,6 +901,9 @@ class TestHTTP(unittest.TestCase):
                          "coder")
         self.assertEqual(run.model_request_id("mlx", "coder", "/store/models/coder"),
                          "/store/models/coder")
+        # omlx validates the field and serves under the dir basename == alias.
+        self.assertEqual(run.model_request_id("omlx", "coder", "/store/models/coder"),
+                         "coder")
 
 
 # --------------------------------------------------------------------------
@@ -1171,6 +1174,9 @@ class TestLifecycle(unittest.TestCase):
         # tells the truth. mlx_lm.server has no /health.
         self.assertTrue(run._ready_url("gguf", 1).endswith("/health"))
         self.assertTrue(run._ready_url("mlx", 1).endswith("/v1/models"))
+        # omlx binds and lists /v1/models before the model loads (like mlx), so
+        # poll that, not its /health, which is green before a lazy first load.
+        self.assertTrue(run._ready_url("omlx", 1).endswith("/v1/models"))
 
     def test_ready_timeout_scales_with_size(self):
         self.assertEqual(run.ready_timeout_s(1000), 180)
