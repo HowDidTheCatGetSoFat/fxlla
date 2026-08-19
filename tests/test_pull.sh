@@ -94,6 +94,11 @@ if grep -q -- '--omlx)         engine=omlx' "$FXLLA"; then
 else
   fail "pull accepts --omlx"
 fi
+if grep -q -- '--mtplx)        engine=mtplx' "$FXLLA"; then
+  pass "pull accepts --mtplx"
+else
+  fail "pull accepts --mtplx"
+fi
 
 # --- every aria2 invocation carries the stall guard -------------------------
 # aria2 defaults --lowest-speed-limit to 0, which means it never abandons a

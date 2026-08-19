@@ -904,6 +904,9 @@ class TestHTTP(unittest.TestCase):
         # omlx validates the field and serves under the dir basename == alias.
         self.assertEqual(run.model_request_id("omlx", "coder", "/store/models/coder"),
                          "coder")
+        # mtplx is a single-model server that accepts any field; send the alias.
+        self.assertEqual(run.model_request_id("mtplx", "coder", "/store/models/coder"),
+                         "coder")
 
 
 # --------------------------------------------------------------------------

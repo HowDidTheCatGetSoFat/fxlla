@@ -699,7 +699,7 @@ class RssSampler:
 # Provenance
 
 def server_provenance(engine, port):
-    binary = {"gguf": "llama-server", "omlx": "omlx"}.get(engine, "mlx_lm.server")
+    binary = {"gguf": "llama-server", "omlx": "omlx", "mtplx": "mtplx"}.get(engine, "mlx_lm.server")
     path = shutil.which(binary)
     version = None
     if engine == "gguf":
@@ -757,9 +757,10 @@ def model_request_id(engine, alias, dest):
     # gguf: llama-server is started with --alias, so the alias is the id.
     # omlx: serves the model under its directory basename (== alias) and
     #   validates the field, so send the alias - a path would 404.
+    # mtplx: single-model server, accepts any field; send the alias for tidiness.
     # mlx: mlx_lm.server takes the model DIRECTORY path. /v1/models is never
     # consulted: mlx_lm enumerates the whole HF cache there.
-    return alias if engine in ("gguf", "omlx") else dest
+    return alias if engine in ("gguf", "omlx", "mtplx") else dest
 
 
 def ready_timeout_s(size_mb):

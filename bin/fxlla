@@ -156,6 +156,14 @@ cmd_setup() {
     info "omlx not installed (optional). For OMLX models: brew tap jundot/omlx https://github.com/jundot/omlx && brew install jundot/omlx/omlx"
   fi
 
+  # MTPLX is the other optional MTP engine (native speculative decode). Same
+  # reason it is not auto-installed: it pins its own mlx and belongs in a venv.
+  if command -v "${FXLLA_MTPLX_BIN:-mtplx}" >/dev/null 2>&1; then
+    ok "mtplx already installed (MTPLX engine)"
+  else
+    info "mtplx not installed (optional). For MTPLX models: python3 -m venv ~/mtplx/.venv && ~/mtplx/.venv/bin/pip install mtplx, then set FXLLA_MTPLX_BIN"
+  fi
+
   [ "$media" = 1 ] && _setup_media
 
   local uvbin="$HOME/.local/bin"
@@ -359,6 +367,7 @@ cmd_pull() {
       --gguf)         engine=gguf ;;
       --mlx)          engine=mlx ;;
       --omlx)         engine=omlx ;;
+      --mtplx)        engine=mtplx ;;
       --quant)        quant="$2"; shift ;;
       --quant=*)      quant="${1#--quant=}" ;;
       --downloader)   downloader="$2"; shift ;;
@@ -368,7 +377,7 @@ cmd_pull() {
       *)              q="$1" ;;
     esac; shift
   done
-  [ -z "$q" ] && die "Usage: fxlla pull <alias|org/repo|civitai:<id>|media:<alias>> [--gguf|--mlx|--omlx] [--quant Q4_K_M] [--downloader aria2|hf] [--yes|-y]"
+  [ -z "$q" ] && die "Usage: fxlla pull <alias|org/repo|civitai:<id>|media:<alias>> [--gguf|--mlx|--omlx|--mtplx] [--quant Q4_K_M] [--downloader aria2|hf] [--yes|-y]"
   case "$downloader" in aria2|hf) ;; *) die "unknown downloader: $downloader (aria2|hf)" ;; esac
   [ "$downloader" = hf ] || need aria2c
 
@@ -1211,6 +1220,27 @@ cmd_backend() {
       --paged-ssd-cache-dir "$base/cache" \
       --paged-ssd-cache-max-size "${FXLLA_OMLX_CACHE_MAX:-20GB}" \
       $FXLLA_SERVER_ARGS
+  elif [ "$engine" = mtplx ]; then
+    # MTPLX is a second venv-pinned MLX server (native MTP speculative decode,
+    # no external drafter), so FXLLA_MTPLX_BIN points at it the way omlx's does.
+    # The model field is not validated (single model), so the gateway sends the
+    # bare alias. --mtp forces speculation, --no-auth because the gateway is the
+    # only caller, --yes to skip the interactive onboarding. --mtp also turns on
+    # MTPLX's own SSD session cache, which defaults to 100GB and would fill a
+    # disk: cap it and give it a per-model dir (its index is thread- not
+    # process-safe across instances, the same reason omlx gets its own base).
+    # A dedicated args var, not FXLLA_SERVER_ARGS: mtplx uses strict argparse and
+    # would reject an mlx_lm/llama-server flag that the shared var might carry.
+    local mtplx_bin="${FXLLA_MTPLX_BIN:-mtplx}"
+    need "$mtplx_bin"
+    local mbase="${FXLLA_MTPLX_BASE:-$MODELS_DIR/.mtplx/$name}"
+    # shellcheck disable=SC2086
+    exec "$mtplx_bin" serve --model "$dest" --host 127.0.0.1 --port "$port" \
+      --no-auth --yes --mtp \
+      --ssd-session-cache on \
+      --ssd-session-cache-dir "$mbase/cache" \
+      --ssd-session-cache-max-size "${FXLLA_MTPLX_CACHE_MAX:-20GB}" \
+      $FXLLA_MTPLX_ARGS
   else
     # shellcheck disable=SC2086
     exec mlx_lm.server --model "$dest" --host 127.0.0.1 --port "$port" $FXLLA_SERVER_ARGS
@@ -1344,6 +1374,7 @@ cmd_on() {
       --mlx) force_engine=mlx ;;
       --gguf) force_engine=gguf ;;
       --omlx) force_engine=omlx ;;
+      --mtplx) force_engine=mtplx ;;
       --pull) do_pull=1 ;;
       --yes|-y) assume=1 ;;
       -*) die "unknown flag: $1" ;;
@@ -1407,6 +1438,20 @@ cmd_on() {
       --paged-ssd-cache-max-size "${FXLLA_OMLX_CACHE_MAX:-20GB}" \
       $FXLLA_SERVER_ARGS > "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
+  elif [ "$engine" = mtplx ]; then
+    local mtplx_bin="${FXLLA_MTPLX_BIN:-mtplx}"
+    need "$mtplx_bin"
+    info "Starting $name (mtplx) at $BASE_URL ..."
+    # Mirrors cmd_backend's mtplx launch; see the rationale for the flags there.
+    local mbase="${FXLLA_MTPLX_BASE:-$MODELS_DIR/.mtplx/$name}"
+    # shellcheck disable=SC2086
+    nohup "$mtplx_bin" serve --model "$dest" --host "$FXLLA_HOST" --port "$FXLLA_PORT" \
+      --no-auth --yes --mtp \
+      --ssd-session-cache on \
+      --ssd-session-cache-dir "$mbase/cache" \
+      --ssd-session-cache-max-size "${FXLLA_MTPLX_CACHE_MAX:-20GB}" \
+      $FXLLA_MTPLX_ARGS > "$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
   else
     need mlx_lm.server
     info "Starting $name (mlx) at $BASE_URL ..."
@@ -1426,6 +1471,7 @@ cmd_on() {
   case "$engine" in
     gguf) id="$name" ;;
     omlx) id="$name" ;;   # omlx serves the model under its directory basename
+    mtplx) id="$name" ;;  # mtplx is a single-model server, accepts any model field
     *)    id="$dest" ;;
   esac
   for _ in $(seq 1 90); do
@@ -1662,6 +1708,7 @@ cmd_doctor() {
   if command -v mlx_lm.server >/dev/null 2>&1; then _chk ok "mlx_lm.server (MLX engine)"; else _chk warn "mlx_lm.server missing (MLX; run: fxlla setup)"; fi
   if command -v llama-server >/dev/null 2>&1; then _chk ok "llama-server (GGUF engine)"; else _chk warn "llama-server missing (GGUF; run: fxlla setup)"; fi
   if command -v "${FXLLA_OMLX_BIN:-omlx}" >/dev/null 2>&1; then _chk ok "omlx (OMLX engine, optional): ${FXLLA_OMLX_BIN:-omlx}"; else _chk warn "omlx not found (optional 3rd engine, SSD KV cache). Install, or set FXLLA_OMLX_BIN to its venv path"; fi
+  if command -v "${FXLLA_MTPLX_BIN:-mtplx}" >/dev/null 2>&1; then _chk ok "mtplx (MTPLX engine, optional): ${FXLLA_MTPLX_BIN:-mtplx}"; else _chk warn "mtplx not found (optional 4th engine, native MTP speculative decode). Install, or set FXLLA_MTPLX_BIN to its venv path"; fi
 
   info "Environment"
   if echo ":$PATH:" | grep -q ":$HOME/.local/bin:"; then _chk ok "$HOME/.local/bin on PATH"; else _chk warn "$HOME/.local/bin not on PATH (add it to your shell rc)"; fi

@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 _STORE = tempfile.mkdtemp(prefix="fxlla-gw-")
 os.environ["FXLLA_STORE"] = _STORE
 _MODELS = os.path.join(_STORE, "models")
-for _name, _engine in (("mlx-model", None), ("gguf-model", "gguf"), ("omlx-model", "omlx")):
+for _name, _engine in (("mlx-model", None), ("gguf-model", "gguf"), ("omlx-model", "omlx"), ("mtplx-model", "mtplx")):
     os.makedirs(os.path.join(_MODELS, _name), exist_ok=True)
     if _engine:
         with open(os.path.join(_MODELS, _name, ".engine"), "w") as _f:
@@ -463,6 +463,9 @@ class TestEngineDetection(unittest.TestCase):
     def test_omlx_marker(self):
         self.assertEqual(gw.engine_for("omlx-model"), "omlx")
 
+    def test_mtplx_marker(self):
+        self.assertEqual(gw.engine_for("mtplx-model"), "mtplx")
+
     def test_missing_model_defaults_mlx(self):
         self.assertEqual(gw.engine_for("nope"), "mlx")
 
@@ -479,6 +482,9 @@ class TestModelField(unittest.TestCase):
         # omlx validates the model field and serves under the dir basename, so
         # it must get the bare alias, not the path mlx gets.
         self.assertEqual(gw.model_field_for("omlx-model"), "omlx-model")
+
+    def test_mtplx_sends_alias(self):
+        self.assertEqual(gw.model_field_for("mtplx-model"), "mtplx-model")
 
 
 class _FakeProc:

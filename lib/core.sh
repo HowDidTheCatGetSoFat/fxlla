@@ -38,6 +38,7 @@ fi
 : "${FXLLA_PORT:=8080}"
 : "${FXLLA_DEFAULT_MODEL:=qwen3-coder}"
 : "${FXLLA_SERVER_ARGS:=}"
+: "${FXLLA_MTPLX_ARGS:=}"      # extra flags for `mtplx serve` only (strict argparse)
 : "${FXLLA_KEEP_WARM:=10}"     # idle minutes before auto-stop (0 = never)
 # CEILING on the context window, not the window itself: each gguf model is
 # served what its own header says it was trained for, capped by this. This is
@@ -305,7 +306,7 @@ resolve_repo() {
   return 1
 }
 
-# alias -> engine (mlx|gguf|omlx). Defaults to mlx.
+# alias -> engine (mlx|gguf|omlx|mtplx). Defaults to mlx.
 resolve_engine() {
   local e; e="$(_catalog_field "$1" 5 2>/dev/null || true)"
   echo "${e:-}"
@@ -436,13 +437,15 @@ _pid_is() {
 }
 
 server_pid()   { [ -f "$PID_FILE" ] && cat "$PID_FILE" 2>/dev/null || true; }
-# Any of the three engines can be behind this pid: gguf models run llama-server,
-# MLX ones mlx_lm.server, OMLX ones `omlx serve`. omlx calls setproctitle, so a
-# running instance shows as `omlx-server` (verified against a live one) rather
-# than its argv - but the title is only set if the setproctitle package is
-# present, so match the argv `omlx serve` too. Neither substring appears in a
-# mere path under an `omlx` directory, which is the false match to avoid.
-server_alive() { _pid_is "$(server_pid)" 'llama-server|mlx_lm\.server|omlx-server|omlx serve'; }
+# Any of the four engines can be behind this pid: gguf models run llama-server,
+# MLX ones mlx_lm.server, OMLX ones `omlx serve`, MTPLX ones a python running
+# `mtplx.server.openai`. omlx calls setproctitle, so it shows as `omlx-server`
+# (verified against a live one) rather than its argv - but the title is only set
+# if setproctitle is present, so match the argv `omlx serve` too. MTPLX's console
+# script execs into `python -m mtplx.server.openai` (verified), so match that
+# module path. None of these substrings appears in a mere directory path, which
+# is the false match to avoid.
+server_alive() { _pid_is "$(server_pid)" 'llama-server|mlx_lm\.server|omlx-server|omlx serve|mtplx\.server\.openai'; }
 
 gateway_pid()   { [ -f "$GATEWAY_PID" ] && cat "$GATEWAY_PID" 2>/dev/null || true; }
 gateway_alive() { _pid_is "$(gateway_pid)" 'fxlla_gateway\.py'; }

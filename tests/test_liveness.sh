@@ -91,7 +91,7 @@ fi
 # All three engine command lines have to be accepted - gguf models run
 # llama-server, MLX ones mlx_lm.server, OMLX ones `omlx serve` - so check the
 # pattern (the same one server_alive uses) against a realistic command for each.
-_engine_pat='llama-server|mlx_lm\.server|omlx-server|omlx serve'
+_engine_pat='llama-server|mlx_lm\.server|omlx-server|omlx serve|mtplx\.server\.openai'
 while IFS='|' read -r label cmd; do
   [ -n "$label" ] || continue
   if printf '%s\n' "$cmd" | grep -qE -- "$_engine_pat"; then
@@ -104,6 +104,7 @@ llama-server|/usr/local/bin/llama-server --model /x --port 8080
 mlx_lm.server|/opt/venv/bin/python -m mlx_lm.server --model /x --port 8080
 omlx serve (argv)|/opt/omlx/.venv/bin/omlx serve --model-dir /x --port 8080
 omlx-server (setproctitle)|omlx-server
+mtplx (server.openai)|/opt/mtplx/.venv/bin/python -m mtplx.server.openai --model /x --port 8080
 EOF
 
 # The anchors are `omlx-server` and `omlx serve`, not a bare `omlx`, precisely so
@@ -116,7 +117,7 @@ else
 fi
 
 printf '\n%s\n' "-----"
-EXPECTED=12
+EXPECTED=13
 if [ "$ran" -ne "$EXPECTED" ]; then
   printf 'FAIL - ran %d assertions, expected %d (the file did not finish)\n' "$ran" "$EXPECTED"
   exit 1

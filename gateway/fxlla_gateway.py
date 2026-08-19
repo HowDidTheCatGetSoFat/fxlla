@@ -888,7 +888,7 @@ class Backend:
         self.proc = proc
         self.size_mb = size_mb
         self.model_field = model_field  # value to send in the proxied 'model' field
-        self.engine = engine            # 'mlx', 'gguf' or 'omlx', resolved at load
+        self.engine = engine            # mlx | gguf | omlx | mtplx, resolved at load
         self.last_used = time.monotonic()
         # Requests currently being proxied to this backend. last_used is
         # stamped when one is dispatched and never again, so a generation that
@@ -906,7 +906,7 @@ class Backend:
 
 
 def engine_for(alias):
-    """Engine marker for a model: 'gguf', 'omlx', or 'mlx' (the default)."""
+    """Engine marker for a model: 'gguf', 'omlx', 'mtplx', or 'mlx' (default)."""
     try:
         with open(os.path.join(MODELS_DIR, alias, ".engine")) as f:
             return f.read().strip() or "mlx"
@@ -922,8 +922,9 @@ def model_field_from(alias, engine):
     OMLX must get the bare alias, not the path: mlx_lm.server ignores the field
     entirely (single model), so sending it a path is harmless, but omlx serves
     the model under its directory basename (== the alias) and actively validates
-    the field - a path would 404 every request."""
-    return alias if engine in ("gguf", "omlx") else os.path.join(MODELS_DIR, alias)
+    the field - a path would 404 every request. MTPLX is a single-model server
+    that accepts any model field, so the alias is the tidy choice there too."""
+    return alias if engine in ("gguf", "omlx", "mtplx") else os.path.join(MODELS_DIR, alias)
 
 
 def model_field_for(alias):
