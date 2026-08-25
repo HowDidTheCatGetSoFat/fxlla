@@ -148,6 +148,26 @@ else
 fi
 rm -rf "$_t"
 
+# --- omlx ANE-prefill enable (_omlx_ane_prep) ----------------------------------
+# FXLLA_OMLX_ANE=1 must write omlx's per-model setting enabling ANE prefill;
+# off must clear any enable a prior run left. Repo-independent, no omlx needed.
+_ab="$(mktemp -d)"
+FXLLA_OMLX_ANE=1 _omlx_ane_prep "$_ab" "mymodel"
+if grep -q '"mymodel":{"qwen35_ane_prefill_enabled":true}' "$_ab/model_settings.json" 2>/dev/null; then
+  pass "FXLLA_OMLX_ANE=1 writes the per-model ANE enable"
+else
+  fail "FXLLA_OMLX_ANE=1 writes the per-model ANE enable (got '$(cat "$_ab/model_settings.json" 2>/dev/null)')"
+fi
+# _omlx_ane_prep returns non-zero when ANE is off (by design; the caller uses it
+# as `... && export`), so tolerate that here under set -e - we assert on the file.
+FXLLA_OMLX_ANE='' _omlx_ane_prep "$_ab" "mymodel" || true
+if [ ! -f "$_ab/model_settings.json" ]; then
+  pass "ANE off clears a stale enable"
+else
+  fail "ANE off clears a stale enable"
+fi
+rm -rf "$_ab"
+
 # --- every aria2 invocation carries the stall guard -------------------------
 # aria2 defaults --lowest-speed-limit to 0, which means it never abandons a
 # connection that has stopped delivering - and a socket that stays OPEN while

@@ -326,6 +326,30 @@ resolve_engine() {
   echo "${e:-}"
 }
 
+# Prepare (or clear) omlx's per-model ANE-prefill setting for a backend fxlla is
+# about to launch. omlx reads <base>/model_settings.json keyed by the model id
+# (for a single-model serve that is the directory basename == the alias) and
+# offloads Qwen3.5 prefill to the Apple Neural Engine when
+# qwen35_ane_prefill_enabled is set. FXLLA_OMLX_ANE turns it on; returns 0 when
+# enabled so the caller can also export the ANE compile-cache env. When off, any
+# enable a previous run wrote is removed so it never lingers.
+# NOTE: enabling the setting is all fxlla can do. omlx still needs a build that
+# carries the ANE custom kernel (OMLX_WITH_CUSTOM_KERNEL=1); without it omlx logs
+# "ANE runtime unavailable" and falls back to the Metal prefill - the setting is
+# then a harmless no-op. SETTINGS_VERSION is 1; a future bump only warns and
+# still reads the flag, so the literal is safe.
+_omlx_ane_prep() {
+  local base="$1" name="$2"
+  if is_true "${FXLLA_OMLX_ANE:-}"; then
+    mkdir -p "$base" || return 1
+    printf '{"version":1,"models":{"%s":{"qwen35_ane_prefill_enabled":true}}}\n' \
+      "$name" > "$base/model_settings.json"
+    return 0
+  fi
+  rm -f "$base/model_settings.json" 2>/dev/null || true
+  return 1
+}
+
 # Normalize an org/repo the way both sides of a comparison must see it: trailing
 # slashes off (a repo path pasted from a URL carries one, and `basename` would
 # then quietly hand back a different folder name than the alias), and case

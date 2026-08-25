@@ -1232,6 +1232,10 @@ cmd_backend() {
     # a default: omlx's help calls --paged-ssd-cache-dir the flag that "enables"
     # the cache, so naming it removes any doubt the feature is on.
     local base="${FXLLA_OMLX_BASE:-$MODELS_DIR/.omlx/$name}"
+    # FXLLA_OMLX_ANE=1 asks omlx to offload Qwen3.5 prefill to the Neural Engine;
+    # inert unless omlx was built with the ANE kernel. Writes the per-model
+    # setting under $base and turns on the AOT compile cache across restarts.
+    _omlx_ane_prep "$base" "$name" && export OMLX_QWEN35_ANE_COMPILE_CACHE=1
     # shellcheck disable=SC2086
     exec "$omlx_bin" serve --model-dir "$dest" --host 127.0.0.1 --port "$port" \
       --base-path "$base" \
@@ -1449,6 +1453,7 @@ cmd_on() {
     # This second launch site has drifted from cmd_backend before, so keep the
     # two in step.
     local base="${FXLLA_OMLX_BASE:-$MODELS_DIR/.omlx/$name}"
+    _omlx_ane_prep "$base" "$name" && export OMLX_QWEN35_ANE_COMPILE_CACHE=1
     # shellcheck disable=SC2086
     nohup "$omlx_bin" serve --model-dir "$dest" --host "$FXLLA_HOST" --port "$FXLLA_PORT" \
       --base-path "$base" \
