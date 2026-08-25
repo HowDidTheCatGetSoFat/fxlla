@@ -295,6 +295,20 @@ EOF
 # bytes under the repo directory.
 media_repo_cached() { media_repo_root "$1" >/dev/null; }
 
+# Split a repo spec into repo<TAB>subdir. A Hugging Face repo is exactly
+# owner/name; any extra path segments are a directory WITHIN the repo. Several
+# publishers ship more than one MLX quant in one repo under mlx-8bit/, mlx-4bit/
+# and put a full-precision copy at the root, so pulling the whole thing would
+# fetch hundreds of GB - the subdir lets `fxlla pull` take only that subtree.
+# subdir is empty for a plain owner/name.
+_repo_subdir() {
+  local r="$1" sub=""
+  case "$r" in
+    */*/*) sub="${r#*/*/}"; r="${r%/"$sub"}" ;;
+  esac
+  printf '%s\t%s\n' "$r" "$sub"
+}
+
 resolve_repo() {
   local q="$1"; [ -z "$q" ] && return 1
   local repo; repo="$(_catalog_field "$q" 2 || true)"

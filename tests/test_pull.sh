@@ -100,6 +100,54 @@ else
   fail "pull accepts --mtplx"
 fi
 
+# --- subfolder repo spec parsing (_repo_subdir) --------------------------------
+# A repo spec may carry a subfolder (owner/name/mlx-8bit) so a pull can take only
+# that subtree of a repo that also ships a huge full-precision copy at its root.
+# shellcheck disable=SC2034  # REPO_ROOT is read by lib/core.sh when sourced below
+REPO_ROOT="$ROOT"
+# shellcheck disable=SC1090
+set +e; . "$ROOT/lib/core.sh"; set -e
+_rs() { _repo_subdir "$1" | tr '\t' '|'; }
+if [ "$(_rs owner/name)" = "owner/name|" ]; then
+  pass "a plain owner/name has no subdir"
+else
+  fail "a plain owner/name has no subdir (got '$(_rs owner/name)')"
+fi
+if [ "$(_rs owner/name/mlx-8bit)" = "owner/name|mlx-8bit" ]; then
+  pass "a single subfolder is split off from the repo"
+else
+  fail "a single subfolder is split off (got '$(_rs owner/name/mlx-8bit)')"
+fi
+if [ "$(_rs owner/name/a/b)" = "owner/name|a/b" ]; then
+  pass "a nested subfolder is kept whole"
+else
+  fail "a nested subfolder is kept whole (got '$(_rs owner/name/a/b)')"
+fi
+# The pull path must flatten the subtree and record the full spec in .source.
+if grep -q 'mv "\$dest/\$subdir/"\* "\$dest/"' "$FXLLA"; then
+  pass "a subfolder pull flattens the subtree into the model dir"
+else
+  fail "a subfolder pull flattens the subtree into the model dir"
+fi
+# Behavioural, repo-independent: the same awk the pull uses selects only the
+# subtree from a synthetic listing (size<TAB>path rows).
+_synth="$(printf '10\tconfig.json\n20\tmlx-8bit/config.json\n30\tmlx-8bit/w.safetensors\n40\tmlx-4bit/config.json\n')"
+_sel="$(printf '%s\n' "$_synth" | awk -F'\t' -v s="mlx-8bit/" 'index($2,s)==1' | awk -F'\t' '{print $2}' | paste -sd, -)"
+if [ "$_sel" = "mlx-8bit/config.json,mlx-8bit/w.safetensors" ]; then
+  pass "the subdir filter selects only the subtree"
+else
+  fail "the subdir filter selects only the subtree (got '$_sel')"
+fi
+# And the flatten lifts that subtree up to the model-dir root.
+_t="$(mktemp -d)"; mkdir -p "$_t/mlx-8bit"; : > "$_t/mlx-8bit/config.json"; : > "$_t/mlx-8bit/w.safetensors"
+mv "$_t/mlx-8bit/"* "$_t/"; rm -rf "$_t/mlx-8bit"
+if [ -f "$_t/config.json" ] && [ -f "$_t/w.safetensors" ] && [ ! -d "$_t/mlx-8bit" ]; then
+  pass "the flatten lifts the subtree into the model dir"
+else
+  fail "the flatten lifts the subtree into the model dir"
+fi
+rm -rf "$_t"
+
 # --- every aria2 invocation carries the stall guard -------------------------
 # aria2 defaults --lowest-speed-limit to 0, which means it never abandons a
 # connection that has stopped delivering - and a socket that stays OPEN while

@@ -381,7 +381,13 @@ cmd_pull() {
   case "$downloader" in aria2|hf) ;; *) die "unknown downloader: $downloader (aria2|hf)" ;; esac
   [ "$downloader" = hf ] || need aria2c
 
-  local repo; repo="$(resolve_repo "$q")" || die "Unknown '$q'. See 'fxlla models' or pass an org/repo from HF."
+  local repo_full; repo_full="$(resolve_repo "$q")" || die "Unknown '$q'. See 'fxlla models' or pass an org/repo from HF."
+  # A repo spec may carry a subfolder (owner/name/mlx-8bit): pull only that
+  # subtree and flatten it below, so a repo that also ships a full-precision copy
+  # at its root is not fetched whole. subdir is empty for a plain owner/name.
+  local repo subdir
+  repo="$(_repo_subdir "$repo_full" | cut -f1)"
+  subdir="$(_repo_subdir "$repo_full" | cut -f2)"
   [ -z "$engine" ] && engine="$(resolve_engine "$q")"
   [ -z "$engine" ] && engine=mlx
   local name; name="$(local_name "$q")"
@@ -393,6 +399,11 @@ cmd_pull() {
 
   local listing; listing="$(_hf_list "$repo")" || die "Could not list $repo (typo? gated without HF_TOKEN?)"
   [ -z "$listing" ] && die "Empty or inaccessible repo: $repo"
+  # Restrict every downstream step (selection, size, download) to the subtree.
+  if [ -n "$subdir" ]; then
+    listing="$(printf '%s\n' "$listing" | awk -F'\t' -v s="$subdir/" 'index($2,s)==1')"
+    [ -z "$listing" ] && die "No files under '$subdir/' in $repo (check the subfolder name)"
+  fi
 
   # select files
   local sel=""
@@ -544,7 +555,16 @@ cmd_pull() {
       die "Download incomplete (pending .aria2 files). Re-run to resume: fxlla pull $q"
     fi
   fi
-  echo "$repo" > "$dest/.source"
+  # A subfolder pull lands under $dest/<subdir>/; lift it to $dest so the model
+  # directory is flat - config.json at the root, which is what every engine and
+  # the metadata readers expect. Runs only after a complete download.
+  if [ -n "$subdir" ] && [ -d "$dest/$subdir" ]; then
+    mv "$dest/$subdir/"* "$dest/" 2>/dev/null || true
+    rm -rf "${dest:?}/${subdir%%/*}"
+  fi
+  # Record the full spec (with the subfolder) so provenance names exactly what
+  # was pulled and 'fxlla pull' of the same alias resolves the same subtree.
+  echo "$repo_full" > "$dest/.source"
   ok "Done: $dest"
   # An embedding model is not a chat model: 'fxlla on embed-small' would try to
   # serve one, and following that suggestion is exactly how a non-chat model ends
