@@ -742,9 +742,9 @@ class TestModelCatalog(unittest.TestCase):
         spec = {"cli": "mflux-generate-x", "caps": {"negative"}, "steps": None}
         with self.assertRaises(ValueError) as ctx:
             media.build_command(spec, "cat", "/o.png", loras=["x.safetensors"],
-                                model_name="mage-flow")
+                                model_name="boogu")
         msg = str(ctx.exception)
-        self.assertIn("mage-flow", msg)
+        self.assertIn("boogu", msg)
         self.assertIn("--lora", msg)
         self.assertIn("Models that do", msg)
 
@@ -766,11 +766,11 @@ class TestModelCatalog(unittest.TestCase):
         # to prevent for the others.
         full = {"cli": "x", "steps": None,
                 "caps": {"negative", "prompt-file", "init-image", "lora",
-                         "lora-style", "quantize", "steps", "seed", "aspect",
+                         "lora-style", "quantize", "steps", "seed",
                          "dimensions"}}
         for cap, kwargs in (
                 ("quantize", {"quantize": 4}), ("steps", {"steps": 2}),
-                ("seed", {"seed": 1}), ("aspect", {"aspect": "1:1"}),
+                ("seed", {"seed": 1}), ("dimensions", {"aspect": "1:1"}),
                 ("dimensions", {"width": 512})):
             lacking = dict(full, caps=full["caps"] - {cap})
             with self.assertRaises(ValueError, msg="%s ungated" % cap):
@@ -1461,8 +1461,21 @@ class TestAspectConflict(unittest.TestCase):
         self.assertEqual(only_dims[only_dims.index("--width") + 1], "512")
         only_aspect = media.build_command(media.MODELS["z-image-turbo"], "c", "/o.png",
                                           aspect="16:9")
-        self.assertEqual(only_aspect[only_aspect.index("--aspect") + 1], "16:9")
-        self.assertNotIn("--width", only_aspect)
+        # mflux has no --aspect; fxlla resolves it to a one-megapixel size.
+        self.assertNotIn("--aspect", only_aspect)
+        self.assertEqual(only_aspect[only_aspect.index("--width") + 1], "1376")
+        self.assertEqual(only_aspect[only_aspect.index("--height") + 1], "768")
+
+    def test_every_aspect_lands_on_the_16_grid(self):
+        for aspect in media.ASPECT_RATIOS:
+            width, height = media.aspect_size(aspect)
+            self.assertEqual((width % 16, height % 16), (0, 0), aspect)
+            self.assertLess(abs(width * height - 1024 * 1024), 1024 * 1024 * 0.05)
+
+    def test_an_unknown_aspect_is_refused(self):
+        with self.assertRaises(ValueError):
+            media.build_command(media.MODELS["z-image-turbo"], "c", "/o.png",
+                                aspect="5:4")
 
 
 class TestDimensionGrid(unittest.TestCase):
@@ -1785,7 +1798,7 @@ class TestCatalogMatchesTheBackend(unittest.TestCase):
     silently discards - negative and guidance on the CFG-off models, steps and
     guidance on ideogram4, negative on the FLUX family, and an init-image flag
     the depth CLI never had. Every one was found by reading mflux's source
-    after something behaved oddly. mflux-cv now publishes which options each
+    after something behaved oddly. mflux now publishes which options each
     CLI honours, so the table can be checked on every run instead.
 
     Skipped where mflux is absent or predates the dump, which is CI: a machine
@@ -1797,7 +1810,7 @@ class TestCatalogMatchesTheBackend(unittest.TestCase):
     # depth-image) have no one-to-one flag and are covered by their own tests.
     FLAGS = {"negative": "--negative-prompt", "guidance": "--guidance",
              "steps": "--steps", "seed": "--seed", "quantize": "--quantize",
-             "aspect": "--aspect", "dimensions": "--width", "lora": "--lora",
+             "dimensions": "--width", "lora": "--lora",
              "lora-style": "--lora-style", "prompt-file": "--prompt-file",
              "preset": "--preset", "pid-decode": "--pid-decode",
              "save-depth": "--save-depth-map",

@@ -6,7 +6,7 @@ friendly names, sane defaults, and output validation in one place.
 
 ## Pieces
 
-- `generate.py` - the wrapper and CLI. Images go through mflux-cv (one CLI per
+- `generate.py` - the wrapper and CLI. Images go through mflux (one CLI per
   model family: `mflux-generate`, `mflux-generate-z-image-turbo`, ...); video
   goes through `ltx-2-mlx` (LTX-2.3); speech goes through mlx-audio (Chatterbox).
   Output lands under `<FXLLA_STORE>/media` and every render is validated (a zero
@@ -22,7 +22,7 @@ Driven through the CLI:
 `fxlla media image|video|voice|edit|upscale|models`, `fxlla media mcp`,
 `fxlla media wire-opencode`.
 
-## Images (mflux-cv)
+## Images (mflux)
 
 ```sh
 fxlla media models                       # list the supported image models
@@ -31,7 +31,8 @@ fxlla media image "a red sailboat at sunset" --model z-image-turbo \
 ```
 
 `z-image-turbo` is the fast default. Common flags: `-q {3,4,5,6,8}` (quantize),
-`--steps`, `--seed`, `--width`/`--height` or `--aspect`, `--low-ram`,
+`--steps`, `--seed`, `--width`/`--height` or `--aspect` (fxlla resolves a
+ratio to a one-megapixel width and height; mflux has no such flag), `--low-ram`,
 `--metadata` (writes a sidecar JSON), `-o <path>`.
 
 ## Video (ltx-2-mlx)

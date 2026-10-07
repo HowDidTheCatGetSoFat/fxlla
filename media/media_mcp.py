@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Minimal MCP server exposing local media generation over stdio.
 
-Newline-delimited JSON-RPC, no dependencies. Image (mflux-cv), video (ltx-2-mlx),
+Newline-delimited JSON-RPC, no dependencies. Image (mflux), video (ltx-2-mlx),
 speech (mlx-audio), edit, and upscale tools, so opencode or Claude Code can
 render media locally.
 
@@ -31,7 +31,7 @@ MEDIA = os.path.join(HERE, "generate.py")
 TOOLS = [
     {"name": "generate_image",
      "description": "Generate an image from a text prompt using the local "
-                    "mflux-cv toolchain. Returns a job id immediately; the "
+                    "mflux toolchain. Returns a job id immediately; the "
                     "render runs in the background. Report the id, finish your "
                     "turn, and pick the result up with media_job_status - do "
                     "not sit waiting on it.",
@@ -189,7 +189,7 @@ TOOLS = [
      }, "required": ["text"]}},
     {"name": "edit_image",
      "description": "Edit an existing image from a text instruction using the "
-                    "local mflux-cv qwen-edit toolchain. Returns the path to the "
+                    "local mflux qwen-edit toolchain. Returns the path to the "
                     "written PNG.",
      "inputSchema": {"type": "object", "properties": {
          "prompt": {"type": "string", "description": "The edit instruction."},
@@ -198,7 +198,7 @@ TOOLS = [
          "quantize": {"type": "integer", "enum": [3, 4, 5, 6, 8]},
      }, "required": ["prompt", "image"]}},
     {"name": "upscale_image",
-     "description": "Upscale an image using the local mflux-cv seedvr2 "
+     "description": "Upscale an image using the local mflux seedvr2 "
                     "diffusion super-resolution. Returns the path to the PNG.",
      "inputSchema": {"type": "object", "properties": {
          "image": {"type": "string", "description": "Path to the input image."},

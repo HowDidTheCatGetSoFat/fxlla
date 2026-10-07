@@ -6,6 +6,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 ## [Unreleased]
 
 ### Added
+- Image models `qwen-2.1` (Qwen-Image 2.1) and `ming` (Ming-Image 0.1 Design,
+  RGBA output), both new in mflux 0.20 and 0.21.
+
 - `qwen3.5-9b` and `gemma-4-12b-qat` in the catalog. The 9B is stock Qwen3.5,
   taken at Q6_K from the same publisher as the 4B and 27B already here, so the
   three sizes differ in size and nothing else - which is the only reason an
@@ -72,6 +75,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
   defect.
 
 ### Changed
+- The image backend moves from mflux-cv, now retired, to upstream mflux 0.21.0
+  (mflux-community), where its fixes were merged. `fxlla setup --media`
+  installs `mflux==0.21.0`. Three things the fork had and upstream does not:
+  `mage-flow` is gone from the catalog; `--aspect` is now resolved by fxlla to
+  a one-megapixel width and height on the 16-pixel grid, since mflux has no such
+  flag; and the catalog follows what upstream reports through
+  `mflux-capabilities` - boogu and fibo take no LoRA, and ernie-turbo has no
+  negative prompt or guidance, because upstream discards them.
+
 - `/v1/models` answers in 30 ms where it took 4.7 seconds, and an editor asks
   for it at startup. The cost was never the sizes - `du` over the whole store
   is 30 ms - it was the GGUF headers. Deriving a serve plan asked four separate

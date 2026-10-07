@@ -28,7 +28,8 @@ deliberately:
 
 - **Text inside the image, posters, layouts** - `ideogram4`, with its JSON
   caption when placement matters (below). `qwen` is the other strong one for
-  rendered text.
+  rendered text; `qwen-2.1` is its newer version and runs 40 steps by default.
+- **Design layouts that need transparency** - `ming` (RGBA output).
 - **Photographic realism** - `krea2`.
 - **Maximum fidelity, slow** - `dev` or `z-image`.
 - **Fastest** - `z-image-turbo`, `schnell`, `boogu`, `ernie-turbo`.

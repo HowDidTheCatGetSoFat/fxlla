@@ -46,11 +46,11 @@ fxlla - local models (MLX + GGUF) on Apple Silicon
                               'reindex <name>' to re-embed after changing model,
                               and 'eval' to score retrieval on the repo docs)
   fxlla graph index|def|refs  Code graph over Python (also callers|impact|unused)
-  fxlla media image "<prompt>"  Generate an image locally (mflux-cv). Also 'models'
+  fxlla media image "<prompt>"  Generate an image locally (mflux). Also 'models'
   fxlla media video "<prompt>"  Generate a short video locally (ltx-2-mlx)
   fxlla media voice "<text>"    Synthesize speech locally (mlx-audio)
-  fxlla media edit "<prompt>" --image p  Edit an image locally (mflux-cv qwen-edit)
-  fxlla media upscale --image p          Upscale an image locally (mflux-cv seedvr2)
+  fxlla media edit "<prompt>" --image p  Edit an image locally (mflux qwen-edit)
+  fxlla media upscale --image p          Upscale an image locally (mflux seedvr2)
   fxlla media models          Image models and what each one supports
   fxlla media loras           LoRAs you have downloaded, and built-in styles
   fxlla media weights         Media weight catalog and what is cached
@@ -90,7 +90,7 @@ EOF
 # Determinism comes from pins, not from bundling bytes: relocatable Python
 # venvs cannot be signed into the app, and a multi-GB dmg would help nobody.
 # ltx-2-mlx has no PyPI release, so its pin is a commit on the public repo.
-MEDIA_PIN_IMAGE="mflux-cv==0.18.33"
+MEDIA_PIN_IMAGE="mflux==0.21.0"
 MEDIA_PIN_VOICE="mlx-audio==0.4.6"
 MEDIA_PIN_VIDEO="git+https://github.com/dgrauet/ltx-2-mlx.git@e1838a85#subdirectory=packages/ltx-pipelines-mlx"
 

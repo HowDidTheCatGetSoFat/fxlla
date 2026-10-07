@@ -439,7 +439,7 @@ fxlla graph wire-opencode
 
 ## Media generation
 
-Generate images, short videos, and speech locally. Images use the mflux-cv
+Generate images, short videos, and speech locally. Images use the mflux
 toolchain, video uses `ltx-2-mlx` (LTX-2.3), speech uses mlx-audio (Chatterbox):
 
 ```sh

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """fxlla media: local image, video, and voice generation.
 
-Images go through the mflux-cv toolchain (mflux-generate, mflux-generate-z-image-turbo,
+Images go through the mflux toolchain (mflux-generate, mflux-generate-z-image-turbo,
 ...), mapping a friendly model name to the right CLI. Video goes through
 ltx-2-mlx (LTX-2.3). Both write under <FXLLA_STORE>/media by default and the
 produced file is validated, since a zero exit code is not proof of a real render.
@@ -15,7 +15,7 @@ Config via environment:
   FXLLA_MEDIA_OUT       output directory (default <FXLLA_STORE>/media)
   FXLLA_VIDEO_BIN       path to the ltx-2-mlx binary (default: ltx-2-mlx on PATH)
   FXLLA_LORA_DIRS       colon-separated directories holding LoRAs
-  FXLLA_MFLUX_BIN_DIR   directory holding the mflux-cv CLIs (default: PATH)
+  FXLLA_MFLUX_BIN_DIR   directory holding the mflux CLIs (default: PATH)
   FXLLA_EDIT_BIN        path to the image-edit CLI (wins over FXLLA_MFLUX_BIN_DIR)
   FXLLA_UPSCALE_BIN     path to the upscale CLI (wins over FXLLA_MFLUX_BIN_DIR)
   FXLLA_MEDIA_KEEP_MODELS  set to keep the gateway's resident models loaded
@@ -48,6 +48,7 @@ import argparse
 import base64
 import glob
 import json
+import math
 import os
 import re
 import shutil
@@ -70,7 +71,7 @@ OUT_DIR = os.environ.get("FXLLA_MEDIA_OUT") or os.path.join(STORE, "media")
 DEFAULT_MODEL = os.environ.get("FXLLA_MEDIA_MODEL", "z-image-turbo")
 DEFAULT_QUANTIZE = 8
 VIDEO_BIN = os.environ.get("FXLLA_VIDEO_BIN", "ltx-2-mlx")
-# Instruction-based image edit and diffusion upscale are separate mflux-cv CLIs.
+# Instruction-based image edit and diffusion upscale are separate mflux CLIs.
 # One directory for the whole mflux family (image models, edit, upscale):
 # image alone is eight per-model CLIs, so a single-binary knob cannot cover
 # it. The specific knobs below still win for edit and upscale.
@@ -149,8 +150,8 @@ def backend_capabilities(timeout_s=300):
 
     The catalog below transcribes this by hand, and a transcription rots: over
     one week four flags were declared that the backend accepts and silently
-    discards, each found by reading mflux's source after the fact. mflux-cv
-    0.18.34 publishes the contract instead - status is honored, ignored or
+    discards, each found by reading mflux's source after the fact. mflux
+    0.19.0 publishes the contract instead - status is honored, ignored or
     conditional, read from the same constants the runtime warnings use - so the
     table can be checked rather than trusted.
 
@@ -193,7 +194,7 @@ GATEWAY_HOST = os.environ.get("FXLLA_HOST", "127.0.0.1")
 GATEWAY_PORT = os.environ.get("FXLLA_PORT", "8080")
 KEEP_MODELS = os.environ.get("FXLLA_MEDIA_KEEP_MODELS", "") not in ("", "0", "false")
 
-# Friendly name -> the mflux-cv CLI and defaults. `base_model` is only needed
+# Friendly name -> the mflux CLI and defaults. `base_model` is only needed
 # for the multi-model `mflux-generate` binary (FLUX.1). `steps` is a sane
 # default for the fast distilled models; None leaves the CLI's own default.
 MODELS_CONF = os.path.join(
@@ -208,7 +209,7 @@ def load_models(path=None):
     the catalog was written. It is load-bearing rather than documentation: a
     flag a model does not support is refused by name here instead of being
     passed through to fail deep inside the backend, and the models genuinely
-    differ (mage-flow has no LoRA at all).
+    differ (boogu and fibo take no LoRA at all).
     """
     models = {}
     try:
@@ -261,8 +262,29 @@ _MFLUX_DEFAULT_STEPS = {
     "dev": 25, "schnell": 4, "krea2": 8, "qwen": 20, "fibo": 50,
     "z-image": 50, "z-image-turbo": 9, "z-controlnet": 8, "controlnet": 25,
     "depth": 25, "ernie": 50, "ernie-turbo": 8, "boogu": 4,
-    "flux2-klein": 4, "mage-flow": 20, "ideogram4": 20,
+    "flux2-klein": 4, "ideogram4": 20, "qwen-2.1": 40, "ming": 12,
 }
+
+
+# --aspect is fxlla's, not mflux's: upstream mflux has no such flag, so a ratio
+# resolves here to the width and height of a one-megapixel image, each rounded
+# up to a multiple of 16 - a size every model's latent grid accepts, Ideogram 4
+# included.
+ASPECT_RATIOS = ("1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16", "18:9",
+                 "9:18", "21:9", "9:21")
+ASPECT_PIXELS = 1024 * 1024
+
+
+def aspect_size(aspect):
+    """Width and height for an aspect ratio such as "16:9"."""
+    if aspect not in ASPECT_RATIOS:
+        raise ValueError("unknown aspect %r; use one of %s"
+                         % (aspect, ", ".join(ASPECT_RATIOS)))
+    w_ratio, h_ratio = (int(n) for n in aspect.split(":"))
+    ratio = w_ratio / h_ratio
+    height = (ASPECT_PIXELS / ratio) ** 0.5
+    return (int(math.ceil(height * ratio / 16)) * 16,
+            int(math.ceil(height / 16)) * 16)
 
 
 # PiD's LQ conditioning was distilled on latents noised at sigma ~ U[0.0, 0.8];
@@ -521,7 +543,7 @@ def build_command(spec, prompt, output, steps=None, seed=None, width=None,
                   controls=None, controlnet_strength=None, depth_image=None,
                   save_depth=False, preset=None, strength=None,
                   pid_decode=False, pid_degrade_sigma=None):
-    """Assemble the mflux-cv argument vector for one image generation.
+    """Assemble the mflux argument vector for one image generation.
 
     Optional flags are checked against the model's declared capabilities
     first, so an unsupported one is refused by name rather than handed to a
@@ -703,16 +725,15 @@ def build_command(spec, prompt, output, steps=None, seed=None, width=None,
             "give either --aspect or --width/--height, not both: aspect %s "
             "would override the requested %sx%s" % (aspect, width or "?", height or "?"))
     if aspect:
-        _require_cap(spec, "aspect", "--aspect", model_name)
-        cmd += ["--aspect", aspect]
-    else:
-        if width or height:
-            _require_cap(spec, "dimensions", "--width/--height", model_name)
-        _check_dim_step(model_name, width, height)
-        if width:
-            cmd += ["--width", str(width)]
-        if height:
-            cmd += ["--height", str(height)]
+        _require_cap(spec, "dimensions", "--aspect", model_name)
+        width, height = aspect_size(aspect)
+    if width or height:
+        _require_cap(spec, "dimensions", "--width/--height", model_name)
+    _check_dim_step(model_name, width, height)
+    if width:
+        cmd += ["--width", str(width)]
+    if height:
+        cmd += ["--height", str(height)]
     if low_ram:
         cmd += ["--low-ram"]
     if metadata:
@@ -1067,7 +1088,7 @@ def generate_speech(text, ref=None, lang=None, model=None, speed=1.0,
 
 def build_edit_command(prompt, image, output, seed=None, quantize=8,
                        bin_path=None):
-    """Assemble the mflux-cv qwen-edit argument vector for one image edit.
+    """Assemble the mflux qwen-edit argument vector for one image edit.
 
     An input image is required: qwen-edit conditions the edit on it, so an
     empty path cannot produce anything. The image is passed via --image-paths
@@ -1105,7 +1126,7 @@ def generate_edit(prompt, image, seed=None, quantize=8, output=None,
 
 
 def build_upscale_command(image, output, scale=None, bin_path=None):
-    """Assemble the mflux-cv seedvr2 argument vector for one image upscale.
+    """Assemble the mflux seedvr2 argument vector for one image upscale.
 
     seedvr2 has no prompt; the input image is the required conditioning. --scale
     maps to the CLI's --resolution, which accepts a target shortest-edge in
