@@ -108,6 +108,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
   Appended, so whatever the caller's PATH already finds still wins. `doctor`
   and `setup` keep reading the PATH they were given: their ~/.local/bin advice
   is about the user's shell rc, and read after the fill-in it would always pass.
+- A backend that failed to start never said why, because the gateway sent its
+  output to /dev/null. Each one now writes `backend-<alias>.log` beside
+  gateway.log, replaced on every load, and the load error carries the exit
+  code, the last line of that log and its path, as in `exited with code 127:
+  ... exec: mlx_lm.server: not found (log: ...)`. A backend still loading at
+  the timeout is reported as not answering rather than as exited.
 - A projector whose name did not START with `mmproj` was invisible, in five
   places at once. Publishers disagree about where the word goes: one writes
   `mmproj-Model-F16.gguf`, another `Model.mmproj-Q8_0.gguf`. Every glob and

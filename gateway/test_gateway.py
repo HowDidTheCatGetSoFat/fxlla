@@ -2,6 +2,7 @@ import importlib
 import inspect
 import json
 import os
+import socket
 import sys
 import tempfile
 import time
@@ -490,6 +491,9 @@ class TestModelField(unittest.TestCase):
 class _FakeProc:
     pid = os.getpid()
 
+    def poll(self):
+        return None   # still running, as a real Popen reads before it exits
+
     def terminate(self):
         pass
 
@@ -571,6 +575,96 @@ class TestEnsureColdLoad(unittest.TestCase):
             self.assertEqual(m.backends, {})   # the raced load is not registered
         finally:
             gw.downloaded_models, gw.subprocess.Popen, gw.Manager._wait_ready = saved
+
+
+class TestBackendStartFailure(unittest.TestCase):
+    """A backend that dies on start has to say why. Its output went to
+    /dev/null, so `exec: mlx_lm.server: not found` reached opencode as "did not
+    become ready" and gateway.log said nothing more. Runs a real process: the
+    fake launcher prints a line, then a colored die()-style line, and exits 127."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        launcher = os.path.join(self.dir, "fxlla")
+        with open(launcher, "w") as f:
+            f.write("#!/bin/sh\n"
+                    "echo 'starting'\n"
+                    "printf '\\033[0;31mbin/fxlla: line 1270: exec: "
+                    "mlx_lm.server: not found\\033[0m\\n' >&2\n"
+                    "exit 127\n")
+        os.chmod(launcher, 0o755)
+        # A port nothing listens on, so a real backend on 8100 cannot answer
+        # the readiness probe in this test's place.
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            free = s.getsockname()[1]
+        saved = (gw.FXLLA_BIN, gw.STATE_DIR, gw.PORT_BASE, gw.downloaded_models)
+
+        def restore():
+            gw.FXLLA_BIN, gw.STATE_DIR, gw.PORT_BASE, gw.downloaded_models = saved
+        self.addCleanup(restore)
+        gw.FXLLA_BIN, gw.STATE_DIR, gw.PORT_BASE = launcher, self.dir, free
+        gw.downloaded_models = lambda: {"mlx-model": {"size_mb": 1}}
+
+    def _failure(self):
+        with self.assertRaises(RuntimeError) as cm:
+            gw.Manager().ensure("mlx-model")
+        return str(cm.exception)
+
+    def test_the_error_names_the_backends_last_line(self):
+        msg = self._failure()
+        self.assertIn("exec: mlx_lm.server: not found", msg)
+        self.assertNotIn("starting", msg)       # the LAST line, not the first
+        self.assertNotIn("\x1b", msg)           # color codes stripped
+
+    def test_the_error_says_it_exited_and_how(self):
+        self.assertIn("exited with code 127", self._failure())
+
+    def test_the_output_is_kept_in_a_log_per_model(self):
+        msg = self._failure()
+        path = os.path.join(self.dir, "backend-mlx-model.log")
+        self.assertIn(path, msg)
+        with open(path) as f:
+            self.assertIn("mlx_lm.server: not found", f.read())
+
+    def test_a_dying_process_of_the_same_alias_leaves_no_nul_holes(self):
+        # A reload can start while the previous process of this alias is still
+        # exiting. It holds the old file at its own offset; truncating that same
+        # file would let its next write leave a run of NULs before it.
+        path = os.path.join(self.dir, "backend-mlx-model.log")
+        old = open(path, "wb")
+        self.addCleanup(old.close)
+        old.write(b"x" * 400)
+        old.flush()
+        self._failure()
+        old.write(b"late output\n")
+        old.flush()
+        with open(path, "rb") as f:
+            data = f.read()
+        self.assertNotIn(b"\0", data)
+        self.assertNotIn(b"late output", data)
+
+    def test_last_log_line_ignores_nul_bytes(self):
+        path = os.path.join(self.dir, "holes.log")
+        with open(path, "wb") as f:
+            f.write(b"\0" * 50 + b"real line\n" + b"\0" * 30 + b"\n" + b"\0\0")
+        self.assertEqual(gw.last_log_line(path), "real line")
+
+    def test_a_backend_still_loading_at_the_timeout_is_not_called_exited(self):
+        # The other way to fail: alive, never listening. The message must not
+        # claim an exit, and the last thing it printed is still the clue.
+        with open(gw.FXLLA_BIN, "w") as f:
+            f.write("#!/bin/sh\necho 'loading weights 40%'\nexec sleep 30\n")
+        wait = gw.Manager._wait_ready
+        gw.Manager._wait_ready = (
+            lambda self, port, timeout=180, proc=None: wait(self, port, timeout=0.3, proc=proc))
+        self.addCleanup(setattr, gw.Manager, "_wait_ready", wait)
+        msg = self._failure()
+        self.assertIn("did not answer within the load timeout", msg)
+        self.assertNotIn("exited", msg)
+        self.assertIn("loading weights 40%", msg)
 
 
 class _TermProc:

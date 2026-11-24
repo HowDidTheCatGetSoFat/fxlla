@@ -68,6 +68,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -86,11 +87,32 @@ STORE = os.environ.get("FXLLA_STORE", "")
 MODELS_DIR = os.path.join(STORE, "models")
 PORT_BASE = int(os.environ.get("FXLLA_BACKEND_PORT_BASE", "8100"))
 FXLLA_BIN = os.environ.get("FXLLA_BIN", "fxlla")
+# Where each backend's output is kept, beside gateway.log. `fxlla serve` passes
+# its state dir; run by hand, the gateway falls back to the temp dir.
+STATE_DIR = os.environ.get("FXLLA_STATE_DIR") or tempfile.gettempdir()
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def log(msg):
     sys.stderr.write("[gateway] %s\n" % msg)
     sys.stderr.flush()
+
+
+def backend_log_path(alias):
+    return os.path.join(STATE_DIR, "backend-%s.log" % alias)
+
+
+def last_log_line(path, limit=300):
+    """The last non-empty line of a backend log, without color codes, or ''."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 4096))
+            tail = f.read().decode("utf-8", "replace").replace("\0", "")
+    except (OSError, TypeError):
+        return ""
+    lines = [ln.strip() for ln in _ANSI.sub("", tail).splitlines() if ln.strip()]
+    return lines[-1][:limit] if lines else ""
 
 
 def _is_loopback(addr):
@@ -1040,10 +1062,30 @@ class Manager:
         ready = False
         stale = False
         model_field = None
+        log_path = backend_log_path(alias)
         try:
             log("loading %s on :%d (%d MB)" % (alias, port, size_mb))
-            proc = subprocess.Popen([FXLLA_BIN, "_backend", alias, str(port)],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # The backend's own output is the only place a failed start is
+            # explained, so it goes to a log per model, truncated on each load.
+            # It went to /dev/null, and `exec: mlx_lm.server: not found` reached
+            # the client as "did not become ready" with nothing to go on.
+            # Unlinked first: a previous process of this alias may still be
+            # dying with the old file open at its own offset, and truncating
+            # that same inode would let its next write leave NUL bytes.
+            try:
+                try:
+                    os.unlink(log_path)
+                except FileNotFoundError:
+                    pass
+                out = open(log_path, "wb")
+            except OSError:
+                out, log_path = subprocess.DEVNULL, None
+            try:
+                proc = subprocess.Popen([FXLLA_BIN, "_backend", alias, str(port)],
+                                        stdout=out, stderr=subprocess.STDOUT)
+            finally:
+                if out is not subprocess.DEVNULL:
+                    out.close()   # the child holds its own copy
             ready = self._wait_ready(port, proc=proc)
         finally:
             with self.lock:
@@ -1058,6 +1100,9 @@ class Manager:
                         alias, port, proc, size_mb, model_field, engine)
                 ev.set()
         if not ready or stale:
+            # Read before terminate(): a backend still loading at the timeout
+            # would otherwise report exiting with -15, the signal we just sent.
+            code = proc.poll() if proc is not None else None
             if proc is not None:
                 try:
                     proc.terminate()
@@ -1065,7 +1110,15 @@ class Manager:
                     pass
             if stale:
                 raise RuntimeError("model '%s' was unloaded during load" % alias)
-            raise RuntimeError("backend for %s did not become ready" % alias)
+            why = ("exited with code %d" % code if code is not None
+                   else "did not answer within the load timeout")
+            last = last_log_line(log_path)
+            if last:
+                why += ": " + last
+            if log_path:
+                why += " (log: %s)" % log_path
+            log("failed to load %s: %s" % (alias, why))
+            raise RuntimeError("backend for %s did not become ready: %s" % (alias, why))
         return port, model_field
 
     def backend_meta(self, alias):
