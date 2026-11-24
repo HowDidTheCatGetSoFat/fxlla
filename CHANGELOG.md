@@ -75,6 +75,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
   defect.
 
 ### Changed
+- `fxlla wire-opencode`, `kb|graph|media wire-opencode` and `skills install`
+  now write opencode's v2 config layout: the `local` provider goes under
+  `providers` (`package`, `settings.baseURL`, `settings.apiKey`) and the
+  `fxlla-rag`, `fxlla-graph` and `fxlla-media` servers under `mcp.servers`,
+  with `disabled` in place of `enabled`. opencode 2 still reads the old layout
+  but flags it deprecated. An existing file that holds those entries in the
+  old layout is migrated in place, so a server is never listed in both; the
+  `apiKey` value and every entry fxlla does not own are left as they were.
+  The migration keeps every field opencode's own v1 translation keeps (model
+  `id`, capabilities, options, variants, cost, `setCacheKey`). A config file
+  with comments or trailing commas is read as JSONC (the rewrite drops the
+  comments); one that does not parse at all makes the command stop with an
+  error and is left untouched. The file is written atomically and stays 0600.
+  The shared reader and writer is `lib/opencode_config.py`.
 - The image backend moves from mflux-cv, now retired, to upstream mflux 0.21.0
   (mflux-community), where its fixes were merged. `fxlla setup --media`
   installs `mflux==0.21.0`. Three things the fork had and upstream does not:

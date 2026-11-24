@@ -21,8 +21,8 @@ trap 'rm -rf "$CFG"' EXIT
 
 oc="$CFG/opencode/opencode.json"
 
-# reads mcp.fxlla-rag.<field> as a compact JSON string
-field() { python3 -c "import json,sys;print(json.dumps(json.load(open('$oc'))['mcp']['fxlla-rag']['$1']))"; }
+# reads mcp.servers.fxlla-rag.<field> (the v2 layout) as a compact JSON string
+field() { python3 -c "import json,sys;print(json.dumps(json.load(open('$oc'))['mcp']['servers']['fxlla-rag']['$1']))"; }
 
 # --- index OFF: plain python3, FXLLA_KB_INDEX empty in the environment ---
 XDG_CONFIG_HOME="$CFG" FXLLA_STORE=/tmp bash "$FXLLA" kb wire-opencode >/dev/null
@@ -55,11 +55,67 @@ esac
 # provider omits it - measured: selecting the provider stopped dead at an api
 # key dialog. Any non-empty string satisfies both sides.
 XDG_CONFIG_HOME="$CFG" FXLLA_STORE=/tmp bash "$FXLLA" wire-opencode >/dev/null
-prov="$(python3 -c "import json;print(json.dumps(json.load(open('$oc'))['provider']['local']['options']))")"
+prov="$(python3 -c "import json;print(json.dumps(json.load(open('$oc'))['providers']['local']['settings']))")"
 case "$prov" in
   *'"apiKey"'*) pass "provider carries an apiKey so opencode does not prompt" ;;
   *) fail "provider carries an apiKey so opencode does not prompt (got $prov)" ;;
 esac
+
+# --- opencode v2 layout, and in-place migration of the v1 entries fxlla owns ---
+# opencode v2 reads the v1 layout but flags it deprecated: provider -> providers,
+# options -> settings, npm -> package, mcp.<name> -> mcp.servers.<name> and
+# enabled -> disabled. fxlla writes v2, and when the file still holds its own v1
+# entries it moves them rather than leave one server in two formats. Entries
+# fxlla does not own stay exactly as the user wrote them.
+M="$(mktemp -d)"; moc="$M/opencode/opencode.json"; mkdir -p "$M/opencode"
+cat > "$moc" <<'JSON'
+{
+  "instructions": ["/keep/me.md"],
+  "mcp": {
+    "other": {"type": "local", "command": ["x"], "enabled": false},
+    "fxlla-rag": {"type": "local", "command": ["old"], "environment": {"A": "1"}, "enabled": true},
+    "fxlla-graph": {"type": "local", "command": ["old"], "enabled": false, "timeout": 7000}
+  },
+  "provider": {
+    "other": {"npm": "x", "options": {"baseURL": "http://x"}},
+    "local": {
+      "npm": "@ai-sdk/openai-compatible", "name": "Old",
+      "options": {"baseURL": "http://old", "apiKey": "my-own-key"},
+      "models": {"m1": {"name": "M1", "limit": {"context": 8192, "output": 2048}}}
+    }
+  }
+}
+JSON
+oc_get() { python3 -c "import json;d=json.load(open('$moc'));print(json.dumps($1))" 2>/dev/null || echo ERR; }
+# expect <description> <python expression over d> <expected JSON>
+expect() {
+  if [ "$(oc_get "$2")" = "$3" ]; then pass "$1"; else fail "$1 (got $(oc_get "$2"))"; fi
+}
+mig() { XDG_CONFIG_HOME="$M" FXLLA_STORE=/tmp bash "$FXLLA" "$@" >/dev/null; }
+mig wire-opencode
+expect "migrated mcp servers live under mcp.servers" '"servers" in d["mcp"] and sorted(d["mcp"]["servers"])' '["fxlla-graph", "fxlla-rag"]'
+expect "no fxlla server is left in the v1 mcp layout" '[k for k in d["mcp"] if k.startswith("fxlla-")]' '[]'
+expect "server uses disabled, not enabled" 'd["mcp"]["servers"]["fxlla-rag"]["disabled"]' 'false'
+expect "v2 server carries no 'enabled' key" '"enabled" in d["mcp"]["servers"]["fxlla-graph"]' 'false'
+expect "a foreign mcp entry is left untouched" 'd["mcp"]["other"]' '{"type": "local", "command": ["x"], "enabled": false}'
+expect "provider uses package, not npm" 'd["providers"]["local"]["package"]' '"aisdk:@ai-sdk/openai-compatible"'
+expect "provider 'local' left the v1 key" '"local" in d.get("provider", {})' 'false'
+expect "a foreign v1 provider is left untouched" 'd["provider"]["other"]["npm"]' '"x"'
+expect "the user's apiKey survives the migration" 'd["providers"]["local"]["settings"]["apiKey"]' '"my-own-key"'
+expect "baseURL is refreshed from the current gateway" 'd["providers"]["local"]["settings"]["baseURL"] != "http://old"' 'true'
+expect "a v1 mcp timeout becomes the v2 per-phase timeout" 'd["mcp"]["servers"]["fxlla-graph"]["timeout"]' '{"startup": 7000, "catalog": 7000, "execution": 7000}'
+# the model map and its limits move with the provider (no gateway here, so
+# wire-opencode leaves the models alone and only migrates them)
+expect "provider models and limits survive the migration" 'd["providers"]["local"]["models"]["m1"]' '{"name": "M1", "limit": {"context": 8192, "output": 2048}}'
+expect "unrelated top-level keys are untouched" 'd["instructions"]' '["/keep/me.md"]'
+mig wire-opencode --all
+expect "wire-opencode --all registers all three servers under mcp.servers" 'sorted(d["mcp"]["servers"])' '["fxlla-graph", "fxlla-media", "fxlla-rag"]'
+expect "--all leaves no fxlla server in the v1 layout" '[k for k in d["mcp"] if k.startswith("fxlla-")]' '[]'
+expect "skills install keeps the user's own instructions" '"/keep/me.md" in d["instructions"]' 'true'
+snap="$(cat "$moc")"
+mig wire-opencode --all
+if [ "$(cat "$moc")" = "$snap" ]; then pass "a second run changes nothing"; else fail "a second run changes nothing"; fi
+rm -rf "$M"
 
 # --- the chosen embedding model is baked in too ---
 # opencode launches rag_mcp.py directly rather than through `fxlla kb mcp`, so

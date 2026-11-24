@@ -746,18 +746,16 @@ _sync_opencode() {
   local model_id="$1" label="$2"
   local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
   mkdir -p "$(dirname "$cfg")"
-  BASE_URL="$BASE_URL" MODEL_ID="$model_id" LABEL="$label" CFG="$cfg" python3 - <<'PY'
-import os, json
+  BASE_URL="$BASE_URL" MODEL_ID="$model_id" LABEL="$label" CFG="$cfg" \
+  PYTHONPATH="$REPO_ROOT/lib" python3 - <<'PY'
+import os
+import opencode_config as oc
 cfg = os.environ["CFG"]
-try:
-    with open(cfg) as f: data = json.load(f)
-except Exception:
-    data = {}
-data.setdefault("$schema", "https://opencode.ai/config.json")
-loc = data.setdefault("provider", {}).setdefault("local", {})
-loc["npm"] = "@ai-sdk/openai-compatible"
+data = oc.open_config(cfg)
+loc = oc.local_provider(data)
+loc["package"] = "aisdk:@ai-sdk/openai-compatible"
 loc["name"] = "Local (MLX/llama.cpp)"
-opts = loc.setdefault("options", {})
+opts = loc.setdefault("settings", {})
 opts["baseURL"] = os.environ["BASE_URL"]
 # The local servers validate no key, but opencode prompts for one when the
 # provider does not carry it. Any non-empty string satisfies both sides;
@@ -768,7 +766,7 @@ if mid:
     loc["models"] = { mid: { "name": os.environ["LABEL"] } }
 else:
     loc.setdefault("models", {})
-with open(cfg, "w") as f: json.dump(data, f, indent=2)
+oc.save(cfg, data)
 print(cfg)
 PY
 }
@@ -957,14 +955,11 @@ _skills_install_opencode() {
     name="$(basename "$d")"
     _skills_copy_one "$d" "$store/$name"
   done
-  CFG="$cfg" SRC="$store" python3 - <<'PY'
-import os, json, glob
+  CFG="$cfg" SRC="$store" PYTHONPATH="$REPO_ROOT/lib" python3 - <<'PY'
+import os, glob
+import opencode_config as oc
 cfg = os.environ["CFG"]
-try:
-    with open(cfg) as f: data = json.load(f)
-except Exception:
-    data = {}
-data.setdefault("$schema", "https://opencode.ai/config.json")
+data = oc.open_config(cfg)
 store = os.environ["SRC"]
 paths = sorted(glob.glob(os.path.join(store, "*", "SKILL.md")))
 instr = data.setdefault("instructions", [])
@@ -976,7 +971,7 @@ for p in paths:
     if p not in kept:
         kept.append(p)
 data["instructions"] = kept
-with open(cfg, "w") as f: json.dump(data, f, indent=2)
+oc.save(cfg, data)
 print(cfg)
 PY
   ok "opencode instructions updated: $cfg"
@@ -992,18 +987,16 @@ PY
 _sync_opencode_all() {
   local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
   mkdir -p "$(dirname "$cfg")"
-  BASE_URL="$BASE_URL" MODEL_IDS="${MODEL_IDS:-}" CFG="$cfg" python3 - <<'PY'
-import os, json
+  BASE_URL="$BASE_URL" MODEL_IDS="${MODEL_IDS:-}" CFG="$cfg" \
+  PYTHONPATH="$REPO_ROOT/lib" python3 - <<'PY'
+import os
+import opencode_config as oc
 cfg = os.environ["CFG"]
-try:
-    with open(cfg) as f: data = json.load(f)
-except Exception:
-    data = {}
-data.setdefault("$schema", "https://opencode.ai/config.json")
-loc = data.setdefault("provider", {}).setdefault("local", {})
-loc["npm"] = "@ai-sdk/openai-compatible"
+data = oc.open_config(cfg)
+loc = oc.local_provider(data)
+loc["package"] = "aisdk:@ai-sdk/openai-compatible"
 loc["name"] = "Local (fxlla gateway)"
-opts = loc.setdefault("options", {})
+opts = loc.setdefault("settings", {})
 opts["baseURL"] = os.environ["BASE_URL"]
 # No key is validated locally; without one opencode prompts the user for it.
 opts.setdefault("apiKey", "local")
@@ -1028,7 +1021,7 @@ if models:
     loc["models"] = dict(sorted(models.items()))
 else:
     loc.setdefault("models", {})
-with open(cfg, "w") as f: json.dump(data, f, indent=2)
+oc.save(cfg, data)
 PY
 }
 
@@ -2000,23 +1993,18 @@ _wire_rag_mcp() {
   local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
   mkdir -p "$(dirname "$cfg")"
   local KB_PY; _kb_python
-  CFG="$cfg" MCP="$REPO_ROOT/rag/rag_mcp.py" STORE="$FXLLA_STORE" \
+  CFG="$cfg" MCP="$REPO_ROOT/rag/rag_mcp.py" STORE="$FXLLA_STORE" PYTHONPATH="$REPO_ROOT/lib" \
   EMBED_PORT="${FXLLA_EMBED_PORT:-8090}" KB_INDEX="${FXLLA_KB_INDEX:-}" \
   EMBED_MODEL="${FXLLA_EMBED_MODEL:-}" \
   KB_PY_JSON="$(printf '%s\n' "${KB_PY[@]}" | python3 -c 'import json,sys; print(json.dumps([l.rstrip("\n") for l in sys.stdin]))')" \
   python3 - <<'PY'
 import os, json
+import opencode_config as oc
 cfg = os.environ["CFG"]
-try:
-    with open(cfg) as f: data = json.load(f)
-except Exception:
-    data = {}
-data.setdefault("$schema", "https://opencode.ai/config.json")
-mcp = data.setdefault("mcp", {})
-mcp["fxlla-rag"] = {
-    "type": "local",
-    "command": json.loads(os.environ["KB_PY_JSON"]) + [os.environ["MCP"]],
-    "environment": {
+data = oc.open_config(cfg)
+oc.set_server(data, "fxlla-rag",
+    json.loads(os.environ["KB_PY_JSON"]) + [os.environ["MCP"]],
+    {
         "FXLLA_STORE": os.environ["STORE"],
         "FXLLA_EMBED_PORT": os.environ["EMBED_PORT"],
         # Baked in like the rest: opencode launches rag_mcp.py directly, not
@@ -2025,10 +2013,8 @@ mcp["fxlla-rag"] = {
         # default while the base had been reindexed onto another.
         "FXLLA_EMBED_MODEL": os.environ["EMBED_MODEL"],
         "FXLLA_KB_INDEX": os.environ["KB_INDEX"],
-    },
-    "enabled": True,
-}
-with open(cfg, "w") as f: json.dump(data, f, indent=2)
+    })
+oc.save(cfg, data)
 print(cfg)
 PY
   ok "RAG MCP registered in opencode. Use rag_search over your knowledge bases."
@@ -2075,24 +2061,17 @@ _wire_graph_mcp() {
   local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
   mkdir -p "$(dirname "$cfg")"
   local GRAPH_PY; _graph_python
-  CFG="$cfg" MCP="$REPO_ROOT/graph/graph_mcp.py" STORE="$FXLLA_STORE" \
+  CFG="$cfg" MCP="$REPO_ROOT/graph/graph_mcp.py" STORE="$FXLLA_STORE" PYTHONPATH="$REPO_ROOT/lib" \
   GRAPH_PY_JSON="$(printf '%s\n' "${GRAPH_PY[@]}" | python3 -c 'import json,sys; print(json.dumps([l.rstrip("\n") for l in sys.stdin]))')" \
   python3 - <<'PY'
 import os, json
+import opencode_config as oc
 cfg = os.environ["CFG"]
-try:
-    with open(cfg) as f: data = json.load(f)
-except Exception:
-    data = {}
-data.setdefault("$schema", "https://opencode.ai/config.json")
-mcp = data.setdefault("mcp", {})
-mcp["fxlla-graph"] = {
-    "type": "local",
-    "command": json.loads(os.environ["GRAPH_PY_JSON"]) + [os.environ["MCP"]],
-    "environment": {"FXLLA_STORE": os.environ["STORE"]},
-    "enabled": True,
-}
-with open(cfg, "w") as f: json.dump(data, f, indent=2)
+data = oc.open_config(cfg)
+oc.set_server(data, "fxlla-graph",
+    json.loads(os.environ["GRAPH_PY_JSON"]) + [os.environ["MCP"]],
+    {"FXLLA_STORE": os.environ["STORE"]})
+oc.save(cfg, data)
 print(cfg)
 PY
   ok "Code graph MCP registered in opencode. Use find_definition/find_references/find_callers."
@@ -2154,25 +2133,17 @@ _wire_media_mcp() {
   # set" - which is what drove a real model off the tool and into shell.
   # shellcheck disable=SC2086,SC2163  # export the names in the list
   export $FXLLA_MEDIA_ENV
-  CFG="$cfg" MCP="$REPO_ROOT/media/media_mcp.py" KEYS="$FXLLA_MEDIA_ENV" python3 - <<'PY'
-import os, json
+  CFG="$cfg" MCP="$REPO_ROOT/media/media_mcp.py" KEYS="$FXLLA_MEDIA_ENV" \
+  PYTHONPATH="$REPO_ROOT/lib" python3 - <<'PY'
+import os
+import opencode_config as oc
 cfg = os.environ["CFG"]
-try:
-    with open(cfg) as f: data = json.load(f)
-except Exception:
-    data = {}
-data.setdefault("$schema", "https://opencode.ai/config.json")
+data = oc.open_config(cfg)
 # Forward only the media vars that are actually set (drop FXLLA_MEDIA_OUT etc.
 # when empty so the opencode config stays clean).
 env = {k: os.environ[k] for k in os.environ["KEYS"].split() if os.environ.get(k)}
-mcp = data.setdefault("mcp", {})
-mcp["fxlla-media"] = {
-    "type": "local",
-    "command": ["python3", os.environ["MCP"]],
-    "environment": env,
-    "enabled": True,
-}
-with open(cfg, "w") as f: json.dump(data, f, indent=2)
+oc.set_server(data, "fxlla-media", ["python3", os.environ["MCP"]], env)
+oc.save(cfg, data)
 print(cfg)
 PY
   ok "Media MCP registered in opencode. Use generate_image/generate_video/generate_speech."
