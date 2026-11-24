@@ -167,7 +167,7 @@ cmd_setup() {
   [ "$media" = 1 ] && _setup_media
 
   local uvbin="$HOME/.local/bin"
-  echo ":$PATH:" | grep -q ":$uvbin:" || warn "Add to your shell rc: export PATH=\"$uvbin:\$PATH\""
+  echo ":$CALLER_PATH:" | grep -q ":$uvbin:" || warn "Add to your shell rc: export PATH=\"$uvbin:\$PATH\""
 
   require_store
   ok "Store ready at $MODELS_DIR"
@@ -1736,7 +1736,7 @@ cmd_doctor() {
   if command -v "${FXLLA_MTPLX_BIN:-mtplx}" >/dev/null 2>&1; then _chk ok "mtplx (MTPLX engine, optional): ${FXLLA_MTPLX_BIN:-mtplx}"; else _chk warn "mtplx not found (optional 4th engine, native MTP speculative decode). Install, or set FXLLA_MTPLX_BIN to its venv path"; fi
 
   info "Environment"
-  if echo ":$PATH:" | grep -q ":$HOME/.local/bin:"; then _chk ok "$HOME/.local/bin on PATH"; else _chk warn "$HOME/.local/bin not on PATH (add it to your shell rc)"; fi
+  if echo ":$CALLER_PATH:" | grep -q ":$HOME/.local/bin:"; then _chk ok "$HOME/.local/bin on PATH"; else _chk warn "$HOME/.local/bin not on PATH (add it to your shell rc)"; fi
 
   info "Store"
   if [ -d "$FXLLA_STORE" ]; then

@@ -99,6 +99,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
   prevent.
 
 ### Fixed
+- A gateway started from the menu bar app could load no mlx or gguf model. A
+  GUI app hands its children PATH=/usr/bin:/bin:/usr/sbin:/sbin, so
+  `fxlla _backend` died with exit 127 on `exec mlx_lm.server` (uv installs it
+  in ~/.local/bin) and on `exec llama-server` (Homebrew), and opencode was told
+  only "did not become ready". `lib/core.sh` now appends ~/.local/bin,
+  /opt/homebrew/bin and /usr/local/bin when they exist and are missing.
+  Appended, so whatever the caller's PATH already finds still wins. `doctor`
+  and `setup` keep reading the PATH they were given: their ~/.local/bin advice
+  is about the user's shell rc, and read after the fill-in it would always pass.
 - A projector whose name did not START with `mmproj` was invisible, in five
   places at once. Publishers disagree about where the word goes: one writes
   `mmproj-Model-F16.gguf`, another `Model.mmproj-Q8_0.gguf`. Every glob and

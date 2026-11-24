@@ -14,6 +14,25 @@ need() { command -v "$1" >/dev/null 2>&1 || die "Missing '$1'. Run: fxlla setup"
 # True for the usual opt-in values; empty, 0, false, no, off are all false.
 is_true() { case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in 1|true|yes|on) return 0;; *) return 1;; esac; }
 
+# --- PATH -----------------------------------------------------------------
+# A process started from a GUI app or by launchd inherits
+# PATH=/usr/bin:/bin:/usr/sbin:/sbin, not the user's shell PATH. The menu bar
+# app starts the gateway that way, and every backend it spawned died on
+# `exec mlx_lm.server` (uv installs it in ~/.local/bin) or `exec llama-server`
+# (Homebrew) with exit 127. Append the directories the engines install into:
+# appended, so a binary the caller's PATH already resolves keeps winning and
+# only a missing directory is filled in. CALLER_PATH keeps what was passed in,
+# for the checks that advise on the user's shell rc.
+CALLER_PATH="$PATH"
+for _d in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin; do
+  case ":$PATH:" in
+    *":$_d:"*) ;;
+    *) if [ -d "$_d" ]; then PATH="${PATH:+$PATH:}$_d"; fi ;;
+  esac
+done
+unset _d
+export PATH
+
 # --- configuration --------------------------------------------------------
 # Precedence: already-exported vars > ~/.config/fxlla/config.env > defaults.
 # config.env uses plain assignments, which would otherwise clobber a value the
