@@ -1027,6 +1027,15 @@ class Manager:
         not-yet-loaded model wait on a per-model Event instead of the lock."""
         with self.lock:
             b = self.backends.get(alias)
+            # A backend that exited on its own (a crash, an OOM kill, someone
+            # stopping it) stayed registered, and every request after it got
+            # "Connection refused" until an /admin/unload. Drop it and load
+            # again. poll() is non-blocking and reaps the exit status.
+            if b is not None and b.proc is not None and b.proc.poll() is not None:
+                log("%s exited on its own (code %s); reloading"
+                    % (alias, b.proc.returncode))
+                del self.backends[alias]
+                b = None
             if b is not None:
                 b.last_used = time.monotonic()
                 return b.port, b.model_field
@@ -1182,12 +1191,17 @@ class Manager:
                 b.started = time.monotonic()
                 b.prompt_tokens = prompt_tokens
                 b.produced = 0
+            return b
 
-    def end(self, alias):
+    def end(self, alias, backend=None):
         """Release it, and restamp: idleness starts when the answer finishes,
-        not when it was asked for."""
+        not when it was asked for.
+
+        Pass the Backend that begin() returned. By alias alone, a request on a
+        backend that died and was reloaded meanwhile released the NEW one, and
+        the reaper could then stop it while its own request still streamed."""
         with self.lock:
-            b = self.backends.get(alias)
+            b = self.backends.get(alias) if backend is None else backend
             if b is not None:
                 b.inflight = max(0, b.inflight - 1)
                 b.last_used = time.monotonic()
@@ -1378,11 +1392,11 @@ class Handler(BaseHTTPRequestHandler):
         # this, and a generation that outlives the keep-warm window was being
         # terminated while it streamed.
         chars = _prompt_chars(body) or 0
-        MANAGER.begin(alias, int(chars / _CHARS_PER_TOKEN) if chars else None)
+        held = MANAGER.begin(alias, int(chars / _CHARS_PER_TOKEN) if chars else None)
         try:
             self._proxy(alias, port, model_field, body, reader)
         finally:
-            MANAGER.end(alias)
+            MANAGER.end(alias, held)
 
     def _proxy(self, alias, port, model_field, body, reader):
         # send the model value each backend expects (path for MLX, alias for GGUF)

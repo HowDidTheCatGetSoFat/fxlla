@@ -113,6 +113,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
   prevent.
 
 ### Fixed
+- A backend that exited after it loaded (a crash, an out-of-memory kill, a
+  manual stop) stayed registered in the gateway, so every request for that
+  model got "Connection refused" until an `/admin/unload`. The gateway now
+  checks the process before reusing it, drops a dead one and loads it again.
 - A gateway started from the menu bar app could load no mlx or gguf model. A
   GUI app hands its children PATH=/usr/bin:/bin:/usr/sbin:/sbin, so
   `fxlla _backend` died with exit 127 on `exec mlx_lm.server` (uv installs it

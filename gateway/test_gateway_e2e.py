@@ -50,6 +50,9 @@ class _Backend(BaseHTTPRequestHandler):
 class _DummyProc:
     pid = os.getpid()
 
+    def poll(self):
+        return None   # still running; ensure() checks before reusing it
+
     def terminate(self):
         pass
 

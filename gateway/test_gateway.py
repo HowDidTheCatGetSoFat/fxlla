@@ -667,6 +667,62 @@ class TestBackendStartFailure(unittest.TestCase):
         self.assertIn("loading weights 40%", msg)
 
 
+class _ExitedProc:
+    pid = os.getpid()
+    returncode = -9
+
+    def poll(self):
+        return self.returncode
+
+
+class TestBackendExitedAfterLoad(unittest.TestCase):
+    """A backend that dies after it was registered. It stayed in the registry,
+    so the gateway kept proxying to a closed port and every request got
+    "Connection refused" until someone called /admin/unload."""
+
+    def setUp(self):
+        # The failing launcher from TestBackendStartFailure: a reload attempt
+        # shows up as its "exited with code 127", never as a stale port.
+        TestBackendStartFailure.setUp(self)
+
+    def _manager_with(self, proc):
+        m = gw.Manager()
+        m.backends["mlx-model"] = gw.Backend(
+            "mlx-model", 1, proc, 1, "field", "mlx")
+        return m
+
+    def test_a_dead_backend_is_reloaded_not_returned(self):
+        m = self._manager_with(_ExitedProc())
+        with self.assertRaises(RuntimeError) as cm:
+            m.ensure("mlx-model")
+        self.assertIn("exited with code 127", str(cm.exception))
+        self.assertNotIn("mlx-model", m.backends)
+
+    def test_a_live_backend_is_returned_as_before(self):
+        m = self._manager_with(_FakeProc())
+        self.assertEqual(m.ensure("mlx-model"), (1, "field"))
+
+    def test_a_clean_exit_counts_as_dead_too(self):
+        proc = _ExitedProc()
+        proc.returncode = 0
+        m = self._manager_with(proc)
+        with self.assertRaises(RuntimeError):
+            m.ensure("mlx-model")
+        self.assertNotIn("mlx-model", m.backends)
+
+    def test_a_request_on_the_dead_backend_does_not_release_its_successor(self):
+        # The old request finishes after the alias was reloaded. Released by
+        # alias, it zeroed the new backend's count while that one streamed.
+        m = self._manager_with(_FakeProc())
+        old = m.begin("mlx-model")
+        new = gw.Backend("mlx-model", 2, _FakeProc(), 1, "field", "mlx")
+        m.backends["mlx-model"] = new
+        m.begin("mlx-model")
+        m.end("mlx-model", old)
+        self.assertEqual(new.inflight, 1)
+        self.assertEqual(old.inflight, 0)
+
+
 class _TermProc:
     def __init__(self):
         self.pid = os.getpid()
