@@ -46,6 +46,7 @@ Usage (normally driven via `fxlla media`):
 """
 import argparse
 import base64
+import codecs
 import glob
 import json
 import math
@@ -55,8 +56,14 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
+
+try:
+    import resource
+except ImportError:  # not on Windows; RSS is then simply unknown
+    resource = None
 
 import jobs  # background media jobs (submit, poll, cancel)
 import quality  # perceptual checks on the produced file
@@ -884,6 +891,258 @@ def validate_output(path):
     _check_quality("image", path, quality.check_png)
 
 
+# --- run records, progress and peak memory --------------------------------
+#
+# Every generation leaves a record under <media>/jobs (see jobs.py): an async
+# job's record is made by `jobs.submit` and filled in here through FXLLA_JOB_ID;
+# a synchronous run makes its own. Nothing here may fail or slow a render, so
+# every write is best effort.
+
+_TRACKER = None
+
+# tqdm bars: "<desc>: NN%|#####     | N/M [00:19<00:19, 19.49s/it]". The bar has
+# no description in mflux and one in ltx ("Denoising", "Denoising (guided)").
+_BAR_RE = re.compile(
+    r"^\s*(?:(?P<desc>[^|%]*?):\s*)?\d{1,3}%\|[^|]*\|\s*(?P<n>\d+)/(?P<m>\d+)\b")
+_STEP_RE = re.compile(r"\bstep\s+(\d+)\s*/\s*(\d+)\b", re.IGNORECASE)
+# Weight fetches use the same bar ("Fetching 3 files": mlx-audio prints two of
+# them) and say nothing about the render.
+_NOT_A_RENDER = re.compile(r"fetch|download|load|file|shard|checkpoint",
+                           re.IGNORECASE)
+
+
+def parse_progress(line):
+    """(step, total) from one output line, or None. Never guesses."""
+    match = _BAR_RE.match(line)
+    if match:
+        if match.group("desc") and _NOT_A_RENDER.search(match.group("desc")):
+            return None
+        step, total = int(match.group("n")), int(match.group("m"))
+    else:
+        match = _STEP_RE.search(line)
+        if not match:
+            return None
+        step, total = int(match.group(1)), int(match.group(2))
+    if total <= 0 or step > total:
+        return None
+    return step, total
+
+
+def split_lines(text):
+    """Lines of a text, splitting on \\n and on \\r: tqdm redraws one line
+    with a bare \\r, so splitting on \\n alone sees the whole bar as one."""
+    return [ln for ln in re.split(r"\r\n|\r|\n", text) if ln]
+
+
+class LineSplitter(object):
+    """Feed bytes as they arrive; get each finished line (split on \\n or \\r)."""
+
+    def __init__(self, callback):
+        self._callback = callback
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._pending = ""
+
+    def feed(self, chunk):
+        parts = re.split(r"\r\n|\r|\n", self._pending + self._decoder.decode(chunk))
+        self._pending = parts.pop()
+        for line in parts:
+            if line:
+                self._callback(line)
+
+    def close(self):
+        self._pending += self._decoder.decode(b"", final=True)
+        if self._pending:
+            self._callback(self._pending)
+        self._pending = ""
+
+
+def rss_mb(raw, platform=None):
+    """ru_maxrss in MB. macOS reports bytes and Linux reports kilobytes."""
+    if not raw or raw <= 0:
+        return None
+    divisor = 1024 * 1024 if (platform or sys.platform) == "darwin" else 1024
+    return int(round(raw / float(divisor)))
+
+
+def peak_rss_mb(who="children"):
+    """Peak resident memory of the backend subprocesses so far, in MB, or None.
+
+    RUSAGE_CHILDREN covers every child this process has waited on; RUSAGE_SELF
+    is for a backend that ran in-process, which no generator here does."""
+    if resource is None:
+        return None
+    try:
+        which = resource.RUSAGE_SELF if who == "self" else resource.RUSAGE_CHILDREN
+        return rss_mb(resource.getrusage(which).ru_maxrss)
+    except (OSError, ValueError):
+        return None
+
+
+def run_facts(args):
+    """What the caller asked for, as the record's model/steps/size fields.
+
+    A knob the caller did not set stays None: the backend's own default is not
+    ours to guess. The one exception is the image model, because a render
+    without --model runs DEFAULT_MODEL and says so nowhere else."""
+    model = getattr(args, "model", None)
+    if args.cmd == "image" and not model:
+        model = DEFAULT_MODEL
+    return {"model": model, "steps": getattr(args, "steps", None),
+            "width": getattr(args, "width", None),
+            "height": getattr(args, "height", None)}
+
+
+class RunTracker(object):
+    """Writes one run's facts into its job record. Best effort throughout."""
+
+    def __init__(self, job_id, own, clock=time.time):
+        self.job_id, self.own, self._clock = job_id, own, clock
+        self.output = None
+        self._written = None   # (step, total) last written
+        self._wrote_at = None
+        self._pending = None
+
+    def progress(self, step, total):
+        if not self.job_id or (step, total) == self._written:
+            return
+        now = self._clock()
+        if self._wrote_at is not None and now - self._wrote_at < 1.0:
+            self._pending = (step, total)   # too soon: keep the newest
+            return
+        self._write_progress(step, total, now)
+        self._pending = None
+
+    def _write_progress(self, step, total, now):
+        self._written, self._wrote_at = (step, total), now
+        jobs.update(self.job_id,
+                    progress={"step": step, "total": total, "at": now})
+
+    def finish(self, ok, error=None):
+        if not self.job_id:
+            return
+        fields = {"peak_rss_mb": peak_rss_mb()}
+        if self._pending and self._pending != self._written:
+            step, total = self._pending
+            fields["progress"] = {"step": step, "total": total,
+                                  "at": self._clock()}
+        if self.own:
+            fields.update(status="done" if ok else "failed",
+                          finished=time.time(), output=self.output,
+                          error=None if ok else error)
+        jobs.update(self.job_id, **fields)
+
+
+def note_output(path):
+    if _TRACKER is not None:
+        _TRACKER.output = path
+
+
+def _error_text(exc):
+    if isinstance(exc, SystemExit):
+        text = exc.code if isinstance(exc.code, str) else "exit %s" % exc.code
+    else:
+        text = str(exc) or type(exc).__name__
+    return str(text)[-800:]
+
+
+def run_tracked(args, fn):
+    """Run one generator command and keep its record. Exit codes, exceptions
+    and what the command prints are exactly what `fn` would have produced."""
+    global _TRACKER
+    tracker = None
+    try:
+        facts = run_facts(args)
+        job_id = os.environ.get("FXLLA_JOB_ID")
+        if job_id and jobs.valid_id(job_id):
+            jobs.update(job_id, **facts)
+            tracker = RunTracker(job_id, own=False)
+        else:
+            tracker = RunTracker(
+                jobs.begin_sync(args.cmd, facts, argv=sys.argv[1:],
+                                summary=_summary(args)), own=True)
+    except Exception:
+        tracker = None
+    _TRACKER = tracker
+    try:
+        result = fn(args)
+    except BaseException as exc:
+        ok = isinstance(exc, SystemExit) and exc.code in (None, 0)
+        if tracker:
+            tracker.finish(ok, None if ok else _error_text(exc))
+        raise
+    else:
+        if tracker:
+            tracker.finish(True)
+        return result
+    finally:
+        _TRACKER = None
+
+
+def run_backend(cmd, env=None, tracker=None):
+    """subprocess.run(cmd, capture_output=True, text=True), plus a live view.
+
+    The captured text is the same one callers always got (newlines translated
+    as text mode does), so warnings, failure messages and the output path are
+    unchanged. On the way, each line (split on \\n and \\r) is checked for a
+    progress bar. Inside an async job the output is also relayed to our stderr,
+    which jobs.run keeps in the job log; a direct run prints nothing extra."""
+    tracker = tracker if tracker is not None else _TRACKER
+    relay = bool(os.environ.get("FXLLA_JOB_ID"))
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=env)
+    chunks = {"out": [], "err": []}
+    lock = threading.Lock()
+
+    def on_line(line):
+        found = parse_progress(line)
+        if found and tracker is not None:
+            try:
+                tracker.progress(*found)
+            except Exception:
+                pass
+
+    def pump(stream, key):
+        splitter = LineSplitter(on_line)
+        fd = stream.fileno()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks[key].append(chunk)
+            try:
+                splitter.feed(chunk)
+                if relay:
+                    with lock:
+                        sys.stderr.write(chunk.decode("utf-8", "replace"))
+                        sys.stderr.flush()
+            except Exception:
+                pass
+        try:
+            splitter.close()
+        except Exception:
+            pass
+
+    threads = [threading.Thread(target=pump, args=(proc.stdout, "out")),
+               threading.Thread(target=pump, args=(proc.stderr, "err"))]
+    for t in threads:
+        t.start()
+    try:
+        for t in threads:
+            t.join()
+        returncode = proc.wait()
+    except BaseException:
+        proc.kill()
+        raise
+    finally:
+        proc.stdout.close()
+        proc.stderr.close()
+
+    def text(key):
+        raw = b"".join(chunks[key]).decode("utf-8", "replace")
+        return raw.replace("\r\n", "\n").replace("\r", "\n")
+    return subprocess.CompletedProcess(cmd, returncode, text("out"), text("err"))
+
+
 def generate_image(prompt, model=None, steps=None, seed=None, width=None,
                    height=None, aspect=None, quantize=None, low_ram=False,
                    metadata=False, output=None, keep_models=False,
@@ -927,14 +1186,15 @@ def generate_image(prompt, model=None, steps=None, seed=None, width=None,
     # A --lora given as a repo id is a dependency too, and no catalog row
     # names it - without this the root choice is blind to where it lives and
     # mflux quietly fetches it again.
-    proc = subprocess.run(cmd, capture_output=True, text=True,
-                          env=_env("image", model,
-                                   ("pid",) if pid_decode else (),
-                                   _lora_repo_ids(loras)))
+    proc = run_backend(cmd,
+                       env=_env("image", model,
+                                ("pid",) if pid_decode else (),
+                                _lora_repo_ids(loras)))
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr.strip() or "%s failed" % spec["cli"])[-800:])
     _report_warnings(proc.stderr)
     validate_output(output)
+    note_output(output)
     return output
 
 
@@ -1032,12 +1292,12 @@ def generate_video(prompt, stage=DEFAULT_STAGE, frames=None,
                               images=images, steps=steps,
                               stage1_steps=stage1_steps,
                               stage2_steps=stage2_steps)
-    proc = subprocess.run(cmd, capture_output=True, text=True,
-                          env=_env("video", model))
+    proc = run_backend(cmd, env=_env("video", model))
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr.strip() or "video generation failed")[-800:])
     _report_warnings(proc.stderr)
     validate_video_output(output)
+    note_output(output)
     return output
 
 
@@ -1077,12 +1337,12 @@ def generate_speech(text, ref=None, lang=None, model=None, speed=1.0,
     free_gpu("voice", keep_models)
     cmd = build_voice_command(text, output, ref or VOICE_REF, model=model,
                               lang=lang, speed=speed)
-    proc = subprocess.run(cmd, capture_output=True, text=True,
-                          env=_env("voice", model))
+    proc = run_backend(cmd, env=_env("voice", model))
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr.strip() or "voice generation failed")[-800:])
     _report_warnings(proc.stderr)
     validate_wav_output(output)
+    note_output(output)
     return output
 
 
@@ -1117,11 +1377,12 @@ def generate_edit(prompt, image, seed=None, quantize=8, output=None,
     output = resolve_output(output, "edit", "png")
     free_gpu("edit", keep_models)
     cmd = build_edit_command(prompt, image, output, seed=seed, quantize=quantize)
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=_env("edit"))
+    proc = run_backend(cmd, env=_env("edit"))
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr.strip() or "image edit failed")[-800:])
     _report_warnings(proc.stderr)
     validate_output(output)
+    note_output(output)
     return output
 
 
@@ -1149,12 +1410,12 @@ def generate_upscale(image, scale=None, output=None, keep_models=False):
     output = resolve_output(output, "upscale", "png")
     free_gpu("upscale", keep_models)
     cmd = build_upscale_command(image, output, scale=scale)
-    proc = subprocess.run(cmd, capture_output=True, text=True,
-                          env=_env("upscale"))
+    proc = run_backend(cmd, env=_env("upscale"))
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr.strip() or "image upscale failed")[-800:])
     _report_warnings(proc.stderr)
     validate_output(output)
+    note_output(output)
     return output
 
 
@@ -1994,11 +2255,15 @@ def main():
         if estimate:
             print("typically %s here" % _human_seconds(estimate))
         return
-    {"image": cmd_image, "video": cmd_video, "voice": cmd_voice,
+    handler = {"image": cmd_image, "video": cmd_video, "voice": cmd_voice,
      "edit": cmd_edit, "upscale": cmd_upscale, "models": cmd_models,
      "loras": cmd_loras, "timings": cmd_timings, "describe": cmd_describe,
      "voice-python": lambda _a: print(resolved_voice_python()),
-     "jobs": cmd_jobs, "job": cmd_job, "cancel": cmd_cancel}[args.cmd](args)
+     "jobs": cmd_jobs, "job": cmd_job, "cancel": cmd_cancel}[args.cmd]
+    if args.cmd in ("image", "video", "voice", "edit", "upscale"):
+        run_tracked(args, handler)
+    else:
+        handler(args)
 
 
 if __name__ == "__main__":
