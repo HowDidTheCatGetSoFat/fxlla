@@ -94,9 +94,16 @@ def lock_path(job_id):
     return _path(job_id) + ".lock"
 
 
-def _update(job_id, **fields):
+# What a finished run reports about itself. A record already 'cancelled' keeps
+# these as they are: the cancel is the person's decision, the exit is its echo.
+_OUTCOME_FIELDS = ("status", "finished", "output", "error")
+
+
+def _update(job_id, _keep_cancelled=False, **fields):
     """Re-read then write under a per-record lock, so concurrent updates (this
-    module's status changes, generate.py's progress) do not clobber each other."""
+    module's status changes, generate.py's progress) do not clobber each other.
+    With _keep_cancelled, a record already cancelled gets only the telemetry
+    fields."""
     if not os.path.exists(_path(job_id)):
         return None
     with open(lock_path(job_id), "a") as lock:
@@ -104,6 +111,8 @@ def _update(job_id, **fields):
         rec = _read(job_id)
         if rec is None:
             return None
+        if _keep_cancelled and rec.get("status") == "cancelled":
+            fields = {k: v for k, v in fields.items() if k not in _OUTCOME_FIELDS}
         rec.update(fields)
         _write(rec)
         return rec
@@ -158,9 +167,10 @@ def _telemetry_fields(media, is_job):
 
 
 def update(job_id, **fields):
-    """_update that never raises: telemetry must not fail a render."""
+    """_update that never raises (telemetry must not fail a render) and never
+    replaces a cancelled status."""
     try:
-        return _update(job_id, **fields)
+        return _update(job_id, _keep_cancelled=True, **fields)
     except Exception:
         return None
 
@@ -239,18 +249,22 @@ def cancel(job_id):
     rec = get(job_id)
     if rec is None or rec["status"] not in ACTIVE:
         return rec
+    # Record the decision before signalling, so the exit that follows finds it.
+    out = _update(job_id, status="cancelled", finished=time.time())
     pid = rec.get("pid")
     if pid:
         try:
             if rec.get("job") is False:
                 # A sync run is not a session leader: its process group is the
-                # caller's shell pipeline or MCP server. Signal only the pid.
+                # caller's shell pipeline or MCP server. Signal only the pid;
+                # generate.py turns that SIGTERM into an exit that also stops
+                # its backend child.
                 os.kill(pid, signal.SIGTERM)
             else:
                 os.killpg(os.getpgid(pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
             pass
-    return _update(job_id, status="cancelled", finished=time.time())
+    return out
 
 
 def run(job_id):

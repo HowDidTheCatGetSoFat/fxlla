@@ -10,6 +10,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zlib
 
@@ -3202,6 +3203,74 @@ class TestJobRecordUpdates(_RecordCase):
         job_id = self._job()
         media.run_tracked(self._args(cmd="voice"), lambda a: None)
         self.assertIsNone(jobs._read(job_id)["progress"])
+
+
+class TestCancelSyncRun(_RecordCase):
+    def test_cancelling_a_sync_run_stops_its_backend_child(self):
+        mdir = os.path.dirname(os.path.abspath(media.__file__))
+        pidfile = os.path.join(self.tmp, "child.pid")
+        code = (
+            "import argparse, os, sys\n"
+            "sys.path.insert(0, %r)\n"
+            "import generate as g\n"
+            "def fn(args):\n"
+            "    g.run_backend([sys.executable, '-c', "
+            "'import os,time; open(os.environ[\"PIDFILE\"], \"w\")"
+            ".write(str(os.getpid())); time.sleep(60)'])\n"
+            "args = argparse.Namespace(cmd='image', prompt='p', model=None, "
+            "steps=None, width=None, height=None, text=None, image=None)\n"
+            "g.run_tracked(args, fn)\n" % mdir)
+        env = dict(os.environ, FXLLA_MEDIA_OUT=os.path.dirname(jobs.JOBS_DIR),
+                   FXLLA_STORE=self.tmp, PIDFILE=pidfile)
+        env.pop("FXLLA_JOB_ID", None)
+        proc = subprocess.Popen([sys.executable, "-c", code], env=env,
+                                stderr=subprocess.PIPE)
+        self.addCleanup(proc.kill)
+        child = []
+
+        def reap_child():
+            if child:
+                try:
+                    os.kill(child[0], signal.SIGKILL)
+                except OSError:
+                    pass
+        self.addCleanup(reap_child)
+        deadline = time.time() + 20
+        while time.time() < deadline and not child:
+            try:
+                with open(pidfile) as fh:
+                    child.append(int(fh.read()))
+            except (OSError, ValueError):
+                time.sleep(0.05)
+        self.assertTrue(child, "the backend child never started")
+        rec = jobs.listing()[0]
+        self.assertFalse(rec["job"])
+        jobs.cancel(rec["id"])
+        proc.wait(timeout=10)
+
+        def gone(pid):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+        end = time.time() + 5
+        while time.time() < end and not gone(child[0]):
+            time.sleep(0.1)
+        self.assertTrue(gone(child[0]), "the backend child outlived the cancel")
+        self.assertEqual(jobs._read(rec["id"])["status"], "cancelled")
+
+    def test_telemetry_never_replaces_a_cancelled_status(self):
+        job_id = jobs.begin_sync("image", {}, argv=[], summary="")
+        jobs._update(job_id, status="cancelled", finished=5.0)
+        t = media.RunTracker(job_id, own=True)
+        t.output = "/out/x.png"
+        t.finish(False, "exit 143")
+        rec = jobs._read(job_id)
+        self.assertEqual(rec["status"], "cancelled")
+        self.assertEqual(rec["finished"], 5.0)
+        self.assertIsNone(rec["error"])
+        self.assertIn("peak_rss_mb", rec)
 
 
 class TestRecordWritesAreSafe(_RecordCase):

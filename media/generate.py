@@ -53,6 +53,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -1070,6 +1071,7 @@ def run_tracked(args, fn):
     except Exception:
         tracker = None
     _TRACKER = tracker
+    restore = _install_term_handler() if tracker and tracker.own else None
     try:
         result = fn(args)
     except BaseException as exc:
@@ -1083,6 +1085,24 @@ def run_tracked(args, fn):
         return result
     finally:
         _TRACKER = None
+        if restore:
+            restore()
+
+
+def _install_term_handler():
+    """In a tracked synchronous run, turn SIGTERM (what `fxlla media cancel`
+    sends) into an exit, so run_backend's except path kills the backend child
+    instead of orphaning it. Main thread only; returns the undo, or None."""
+    if threading.current_thread() is not threading.main_thread():
+        return None
+
+    def on_term(signum, frame):
+        raise SystemExit(143)
+    try:
+        previous = signal.signal(signal.SIGTERM, on_term)
+    except (ValueError, OSError):
+        return None
+    return lambda: signal.signal(signal.SIGTERM, previous)
 
 
 def run_backend(cmd, env=None, tracker=None):
@@ -1139,6 +1159,9 @@ def run_backend(cmd, env=None, tracker=None):
         returncode = proc.wait()
     except BaseException:
         proc.kill()
+        proc.wait()
+        for t in threads:
+            t.join(timeout=5)
         raise
     finally:
         proc.stdout.close()
