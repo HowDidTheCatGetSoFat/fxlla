@@ -26,6 +26,8 @@ TAIL_MAX = 5000
 RECENT_EVENTS = 50
 RECENT_JOBS = 20
 ERROR_MAX = 200
+KB_BUSY_S = 0.2
+
 
 # The only fields a media item may expose. argv, summary, output and log hold
 # the prompt and home-directory paths and are never copied.
@@ -119,6 +121,7 @@ class ToolsReader:
         self.clock = clock
         self.alive = alive
         self._cache = {}
+        self._kb_good = ([], None)
 
     def _cached(self, key, ttl, fn):
         now = self.clock()
@@ -140,7 +143,21 @@ class ToolsReader:
                             lambda: fxlla_events.read_tail("graph", TAIL_MAX))
 
     def _kb_db(self):
-        return self._cached("kbdb", DB_TTL_S, self._read_kb_db)
+        """(bases, db_bytes, stale). A failed read is cached for the same TTL
+        as a good one, and the last good value is served meanwhile."""
+        now = self.clock()
+        hit = self._cache.get("kbdb")
+        if hit is not None and 0 <= now - hit[0] < DB_TTL_S:
+            return hit[1]
+        try:
+            bases, size = self._read_kb_db()
+            val = (bases, size, False)
+            self._kb_good = (bases, size)
+        except Exception:
+            bases, size = self._kb_good
+            val = (bases, size, True)
+        self._cache["kbdb"] = (now, val)
+        return val
 
     def _read_kb_db(self):
         path = os.path.join(self.store, "kb", "kb.db")
@@ -148,9 +165,9 @@ class ToolsReader:
             return [], None
         size = os.path.getsize(path)
         con = sqlite3.connect("file:%s?mode=ro" % _uri_path(path), uri=True,
-                              timeout=1.0)
+                              timeout=KB_BUSY_S)
         try:
-            con.execute("PRAGMA busy_timeout=1000")
+            con.execute("PRAGMA busy_timeout=%d" % int(KB_BUSY_S * 1000))
             rows = con.execute(
                 "SELECT kb, COUNT(DISTINCT source), COUNT(*) FROM chunks "
                 "GROUP BY kb ORDER BY kb").fetchall()
@@ -179,7 +196,9 @@ class ToolsReader:
         except Exception:
             pass
         try:
-            out["bases"], out["db_bytes"] = self._kb_db()
+            out["bases"], out["db_bytes"], stale = self._kb_db()
+            if stale:
+                out["stale"] = True
         except Exception:
             pass
         return out

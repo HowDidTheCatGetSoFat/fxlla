@@ -305,6 +305,30 @@ class TestKbReader(ReaderBase):
         sqlite3.connect(os.path.join(self.store, "kb", "kb.db")).close()
         self.assertEqual(self.reader.kb()["bases"], [])
 
+    def test_a_locked_db_serves_the_last_good_bases_stale_and_fast(self):
+        path = self.make_db()
+        good = self.reader.kb()["bases"]
+        self.assertEqual(len(good), 2)
+        self.assertNotIn("stale", self.reader.kb())
+        self.clock.t += 11   # past the db cache
+        writer = sqlite3.connect(path, isolation_level=None)
+        self.addCleanup(writer.close)
+        writer.execute("BEGIN EXCLUSIVE")
+        t0 = time.monotonic()
+        first = self.reader.kb()
+        second = self.reader.kb()
+        took = time.monotonic() - t0
+        self.assertLess(took, 0.5)
+        for k in (first, second):
+            self.assertEqual(k["bases"], good)
+            self.assertIs(k["stale"], True)
+        # Recovery: once the writer is done and the TTL passed, fresh again.
+        writer.execute("ROLLBACK")
+        self.clock.t += 11
+        again = self.reader.kb()
+        self.assertEqual(again["bases"], good)
+        self.assertNotIn("stale", again)
+
     def test_caching(self):
         self.write_stream("kb", [{"ts": NOW, "kind": "add", "kb": "a",
                                   "ok": True}])
