@@ -346,6 +346,11 @@ def _record(kind, fields, begin, error):
         pass
 
 
+def _repo_name(path):
+    """Basename of the resolved path, so '.' and '..' name a real directory."""
+    return os.path.basename(os.path.realpath(path)) or None
+
+
 def _error_line(code):
     text = str(code).strip().splitlines()
     first = text[0] if text else ""
@@ -358,7 +363,7 @@ def _error_line(code):
 def _run_recorded(run, args):
     """Run a query or index command and record it. Output and exit unchanged."""
     is_index = args.cmd == "index"
-    fields = ({"repo": os.path.basename(os.path.normpath(args.paths[0])),
+    fields = ({"repo": _repo_name(args.paths[0]),
                "files": None, "defs": None, "refs": None}
               if is_index else {"query": args.cmd, "results": None})
     begin = time.monotonic()

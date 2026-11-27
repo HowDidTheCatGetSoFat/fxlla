@@ -775,6 +775,16 @@ class TestKbEvents(unittest.TestCase):
             self.assertEqual(rec["caller"], "cli")
             self.assertIn("ts", rec)
 
+    def test_add_of_dot_logs_the_resolved_name(self):
+        cwd = os.getcwd()
+        os.chdir(os.path.dirname(self.doc))
+        try:
+            self._main("add", "k1", ".")
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(self._events()[-1]["source"],
+                         os.path.basename(os.path.realpath(self.tmp)))
+
     def test_embed_cold_reflects_a_server_this_process_started(self):
         self._main("add", "k1", self.doc)
         core.Embedder = _FakeColdEmbedder

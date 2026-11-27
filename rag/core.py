@@ -761,7 +761,7 @@ def cmd_eval(args):
 # The basename of what was added; with several paths there is no single source.
 def _add_source(args):
     paths = getattr(args, "paths", None) or []
-    return os.path.basename(os.path.normpath(paths[0])) if len(paths) == 1 else None
+    return (os.path.basename(os.path.realpath(paths[0])) or None) if len(paths) == 1 else None
 
 
 def main():

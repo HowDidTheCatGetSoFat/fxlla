@@ -287,6 +287,27 @@ class TestGraphEventsStubbed(_EventsBase):
         with open(os.path.join(self.state, "graph.jsonl")) as f:
             self.assertNotIn(self.tmp, f.read())
 
+    def test_index_of_dot_logs_the_resolved_directory_name(self):
+        codegraph.cmd_index = lambda a: (1, 1, 1)
+        repo = os.path.join(self.tmp, "dotrepo")
+        os.makedirs(repo)
+        cwd = os.getcwd()
+        os.chdir(repo)
+        try:
+            self._main("index", ".")
+            self._main("index", "..")
+        finally:
+            os.chdir(cwd)
+        dot, dotdot = self._events()
+        self.assertEqual(dot["repo"], os.path.basename(os.path.realpath(repo)))
+        self.assertEqual(dotdot["repo"],
+                         os.path.basename(os.path.realpath(self.tmp)))
+
+    def test_index_of_root_logs_null_repo(self):
+        codegraph.cmd_index = lambda a: (1, 1, 1)
+        self._main("index", "/")
+        self.assertIsNone(self._events()[-1]["repo"])
+
     def test_failed_index_has_null_counts(self):
         def boom(_a):
             sys.exit("no indexable source files found in the given paths")
@@ -353,6 +374,17 @@ class TestGraphEventsKuzu(_EventsBase):
         self.assertEqual((qdef["query"], qdef["results"]), ("def", 1))
         self.assertEqual((impact["query"], impact["results"]), ("impact", 2))
         self.assertEqual(len(json.loads(out_def)), 1)
+
+    def test_real_index_of_dot_logs_the_directory_name(self):
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        try:
+            self._main("index", ".")
+        finally:
+            os.chdir(cwd)
+        rec = self._events()[-1]
+        self.assertEqual(rec["repo"], os.path.basename(os.path.realpath(self.tmp)))
+        self.assertEqual((rec["files"], rec["ok"]), (1, True))
 
     def test_json_output_identical_with_and_without_the_log(self):
         self._main("index", self.py)
