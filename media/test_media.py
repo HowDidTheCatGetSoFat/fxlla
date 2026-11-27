@@ -3401,6 +3401,33 @@ class TestJobWorkerOutput(unittest.TestCase):
         with open(jobs.log_path(job_id)) as fh:
             self.assertIn("no such interpreter", fh.read())
 
+    def test_a_failing_log_pump_kills_the_generator_before_run_returns(self):
+        self._gen("import time\ntime.sleep(60)\n")
+        job_id = self._queued()
+        procs = []
+        real_popen = jobs.subprocess.Popen
+
+        def spy(*a, **k):
+            p = real_popen(*a, **k)
+            procs.append(p)
+            return p
+
+        def boom(stream, log):
+            raise OSError(28, "No space left on device")
+        jobs.subprocess.Popen = spy
+        self.addCleanup(setattr, jobs.subprocess, "Popen", real_popen)
+        saved = jobs._pump_stdout
+        jobs._pump_stdout = boom
+        self.addCleanup(setattr, jobs, "_pump_stdout", saved)
+        self.addCleanup(lambda: procs and procs[0].poll() is None and procs[0].kill())
+        jobs.run(job_id)
+        self.assertEqual(len(procs), 1)
+        self.assertIsNotNone(procs[0].poll())
+        rec = jobs._read(job_id)
+        self.assertEqual(rec["status"], "failed")
+        self.assertNotIn("could not start", rec["error"])
+        self.assertIn("No space left", rec["error"])
+
     def test_a_lowercase_backend_warning_line_is_not_a_job_warning(self):
         # In job mode the backend's raw output is relayed into the stream
         # jobs.run reads; only the generator's own marked lines count.

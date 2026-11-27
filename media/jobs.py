@@ -285,6 +285,7 @@ def run(job_id):
         log = log_path(job_id)
         env = dict(os.environ, FXLLA_JOB_ID=job_id)
         out_lines = []
+        proc = None
         try:
             open(log, "wb").close()
             with open(log, "ab", buffering=0) as errfile:
@@ -299,10 +300,19 @@ def run(job_id):
                 proc.wait()
         # A failure is announced too: eight minutes of waiting for nothing is
         # exactly what someone needs told, and silence reads as still running.
-        except Exception as exc:  # the generator could not even start
-            _append_log(log, "generator could not start: %s\n" % exc)
+        except BaseException as exc:
+            if proc is None:  # the generator could not even start
+                what = "generator could not start: %s" % exc
+            else:
+                # It started. Stop it and wait before the lock is released, or
+                # the next job renders beside a generator nobody tracks.
+                _stop(proc)
+                what = "generator stopped: %s" % exc
+            _append_log(log, what + "\n")
             notify(_update(job_id, status="failed", finished=time.time(),
-                           error=str(exc)))
+                           error=what if proc is not None else str(exc)))
+            if not isinstance(exc, Exception):
+                raise
             return
         if proc.returncode != 0:
             notify(_update(job_id, status="failed", finished=time.time(),
@@ -329,6 +339,18 @@ def run(job_id):
 
 # Prefix of the warning lines generate.py prints in a job (see _report_warnings).
 WARNING_MARK = "fxlla-warning: "
+
+
+def _stop(proc):
+    """Kill the generator and wait for it. Never raises."""
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=30)
+    except Exception:
+        pass
 
 
 def _append_log(path, text):
