@@ -68,23 +68,45 @@ def _read(job_id):
         return None
 
 
+_TMP_COUNTER = [0]
+
+
 def _write(rec):
-    # Atomic: readers (fxlla media jobs) never see a half-written record.
+    # Atomic: readers (fxlla media jobs) never see a half-written record. Each
+    # write has its own tmp name (pid plus a counter), so two writers on one
+    # record never share a half-written file.
     path = _path(rec["id"])
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(rec, fh)
-    os.replace(tmp, path)
+    _TMP_COUNTER[0] += 1
+    tmp = "%s.%d.%d.tmp" % (path, os.getpid(), _TMP_COUNTER[0])
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def lock_path(job_id):
+    return _path(job_id) + ".lock"
 
 
 def _update(job_id, **fields):
-    """Re-read then write, so concurrent updates do not clobber each other."""
-    rec = _read(job_id)
-    if rec is None:
+    """Re-read then write under a per-record lock, so concurrent updates (this
+    module's status changes, generate.py's progress) do not clobber each other."""
+    if not os.path.exists(_path(job_id)):
         return None
-    rec.update(fields)
-    _write(rec)
-    return rec
+    with open(lock_path(job_id), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        rec = _read(job_id)
+        if rec is None:
+            return None
+        rec.update(fields)
+        _write(rec)
+        return rec
 
 
 def _alive(pid):
@@ -203,7 +225,8 @@ def prune():
     for rec in listing():
         if rec["status"] in ACTIVE:
             continue
-        for path in (_path(rec["id"]), log_path(rec["id"])):
+        for path in (_path(rec["id"]), log_path(rec["id"]),
+                     lock_path(rec["id"])):
             try:
                 os.remove(path)
             except OSError:

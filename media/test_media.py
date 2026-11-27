@@ -3204,6 +3204,46 @@ class TestJobRecordUpdates(_RecordCase):
         self.assertIsNone(jobs._read(job_id)["progress"])
 
 
+class TestRecordWritesAreSafe(_RecordCase):
+    def _job(self):
+        rec = {"id": "1785500000-abcdef", "kind": "image", "media": "image",
+               "job": True, "status": "running", "argv": [], "summary": "",
+               "output": None, "error": None, "pid": os.getpid(), "created": 1.0,
+               "started": 2.0, "finished": None, "log": ""}
+        jobs._write(rec)
+        return rec["id"]
+
+    def test_two_processes_updating_one_record_lose_nothing(self):
+        job_id = self._job()
+        mdir = os.path.dirname(os.path.abspath(media.__file__))
+        code = ("import sys\n"
+                "sys.path.insert(0, %r)\n"
+                "import jobs\n"
+                "field = sys.argv[1]\n"
+                "for i in range(200):\n"
+                "    jobs._update(%r, **{field: i})\n" % (mdir, job_id))
+        env = dict(os.environ, FXLLA_MEDIA_OUT=os.path.dirname(jobs.JOBS_DIR),
+                   FXLLA_STORE=self.tmp)
+        procs = [subprocess.Popen([sys.executable, "-c", code, f], env=env,
+                                  stderr=subprocess.PIPE)
+                 for f in ("field_a", "field_b")]
+        for p in procs:
+            _, err = p.communicate(timeout=120)
+            self.assertEqual(p.returncode, 0, err.decode())
+        rec = jobs._read(job_id)
+        self.assertIsNotNone(rec)
+        self.assertEqual((rec["field_a"], rec["field_b"]), (199, 199))
+        self.assertEqual([n for n in os.listdir(jobs.JOBS_DIR)
+                          if n.endswith(".tmp")], [])
+
+    def test_prune_removes_the_lock_file_too(self):
+        job_id = self._job()
+        jobs._update(job_id, status="done")
+        self.assertTrue(os.path.exists(jobs._path(job_id) + ".lock"))
+        self.assertEqual(jobs.prune(), 1)
+        self.assertEqual(os.listdir(jobs.JOBS_DIR), [])
+
+
 class TestJobWorkerOutput(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
