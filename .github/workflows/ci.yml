@@ -71,7 +71,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Unit tests
-        run: FXLLA_STORE=/tmp python3 -m unittest rag.test_rag graph.test_graph gateway.test_gateway gateway.test_metrics gateway.test_gateway_e2e media.test_media evals.test_evals agent.test_loop gateway.test_ggufmeta -v
+        run: FXLLA_STORE=/tmp python3 -m unittest rag.test_rag graph.test_graph gateway.test_gateway gateway.test_metrics gateway.test_gateway_e2e media.test_media evals.test_evals agent.test_loop gateway.test_ggufmeta gateway.test_telemetry -v
 
       - name: Install uv
         uses: astral-sh/setup-uv@v9.0.0 # no floating v9 tag exists; majors stop at v7

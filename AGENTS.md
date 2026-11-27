@@ -77,6 +77,6 @@ this before opening a pull request.
   `.github/workflows/ci.yml` rather than from memory, because this line drifted
   behind it once and a shorter command still passes, which is how the drift
   goes unnoticed:
-  `FXLLA_STORE=/tmp python3 -m unittest rag.test_rag graph.test_graph gateway.test_gateway gateway.test_metrics gateway.test_gateway_e2e media.test_media evals.test_evals agent.test_loop gateway.test_ggufmeta`.
+  `FXLLA_STORE=/tmp python3 -m unittest rag.test_rag graph.test_graph gateway.test_gateway gateway.test_metrics gateway.test_gateway_e2e media.test_media evals.test_evals agent.test_loop gateway.test_ggufmeta gateway.test_telemetry`.
 - Smoke test the read-only commands: `fxlla models`, `fxlla config`, `fxlla ram`.
 - For runtime changes, validate with the `tiny` model end to end.
