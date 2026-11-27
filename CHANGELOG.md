@@ -16,6 +16,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
   gateway asks the engine for it and strips the extra chunk, so exact counts
   come back without the client seeing a byte it would not have seen before.
   The endpoint has no authentication and never carries prompt or answer text.
+- `/monitor` also covers what never goes through the gateway: kb searches and
+  adds, code graph queries and indexes, and media generations. kb and graph
+  append one line per command to `kb.jsonl` and `graph.jsonl` in the state
+  dir (hits, top score, duration, a cold embedding start, CLI or MCP, never
+  the query). Media extends the job record instead of starting a second log:
+  every generation, direct runs included, now records model, steps, size,
+  peak memory and live step progress, read from the generator's own progress
+  bar. A job's `.log` now holds the generator's output, where it used to be
+  empty. Media items in `/monitor` carry an allowlist of fields only, so the
+  prompt and file paths stay out of it.
 
 - Image models `qwen-2.1` (Qwen-Image 2.1) and `ming` (Ming-Image 0.1 Design,
   RGBA output), both new in mflux 0.20 and 0.21.
