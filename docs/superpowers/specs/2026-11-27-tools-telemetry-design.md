@@ -226,7 +226,8 @@ Existing pruning applies to synchronous records too.
   - When the db is missing, `bases` is `[]` and `db_bytes` is None.
 - **`graph.stats`** must not open kuzu, because of the writer lock and the
   dependency.
-  - `indexed_at` is the `graph.kuzu` mtime.
+  - `indexed_at` is the `ts` of the newest successful `index` record (None
+    when there is none). The kuzu mtime is not used: any query bumps it.
   - `files`, `defs` and `refs` come from the newest successful `index`
     record.
 - **The media jobs directory** is listed at most once per 2 s (cached).

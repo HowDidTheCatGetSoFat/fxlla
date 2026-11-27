@@ -349,7 +349,7 @@ class TestGraphReader(ReaderBase):
         self.assertEqual(g["stats"], {"files": None, "defs": None,
                                       "refs": None, "indexed_at": None})
 
-    def test_stats_from_newest_successful_index_and_kuzu_mtime(self):
+    def test_stats_from_newest_successful_index(self):
         os.makedirs(os.path.join(self.store, "graph"))
         kz = os.path.join(self.store, "graph", "graph.kuzu")
         with open(kz, "wb") as f:
@@ -368,10 +368,30 @@ class TestGraphReader(ReaderBase):
              "duration_ms": 60, "ok": True}])
         g = self.reader.graph()
         self.assertEqual(g["stats"], {"files": 10, "defs": 20, "refs": 30,
-                                      "indexed_at": 1234567})
+                                      "indexed_at": NOW - 40})
         self.assertEqual(g["today"], {"queries": 2, "indexes": 3,
                                       "avg_query_ms": 50})
         self.assertEqual(g["recent"][0]["query"], "refs")
+
+    def test_indexed_at_ignores_kuzu_mtime_and_failed_index(self):
+        os.makedirs(os.path.join(self.store, "graph"))
+        kz = os.path.join(self.store, "graph", "graph.kuzu")
+        with open(kz, "wb") as f:
+            f.write(b"x")
+        self.write_stream("graph", [
+            {"ts": NOW - 50, "kind": "index", "repo": "r", "files": 1,
+             "defs": 2, "refs": 3, "ok": True},
+            {"ts": NOW - 30, "kind": "index", "repo": "r", "ok": False},
+            {"ts": NOW - 10, "kind": "query", "query": "def", "results": 1,
+             "duration_ms": 40, "ok": True}])
+        self.assertEqual(self.reader.graph()["stats"]["indexed_at"], NOW - 50)
+        os.utime(kz, (NOW, NOW))
+        self.assertEqual(self.reader.graph()["stats"]["indexed_at"], NOW - 50)
+
+    def test_indexed_at_none_without_ok_index(self):
+        self.write_stream("graph", [
+            {"ts": NOW - 30, "kind": "index", "repo": "r", "ok": False}])
+        self.assertIsNone(self.reader.graph()["stats"]["indexed_at"])
 
     def test_never_imports_kuzu(self):
         self.write_stream("graph", [])
@@ -398,6 +418,17 @@ def job(i, **kw):
 
 
 class TestMediaReader(ReaderBase):
+    def test_media_falls_back_to_legacy_kind(self):
+        old = job(1)
+        del old["media"]
+        self.write_job(old)
+        weird = job(2, kind="weird")
+        del weird["media"]
+        self.write_job(weird)
+        by = {r["id"]: r for r in self.reader.media()["recent"]}
+        self.assertEqual(by["1700000001-abcdef"]["media"], "image")
+        self.assertIsNone(by["1700000002-abcdef"]["media"])
+
     def test_missing_dir_is_empty(self):
         m = self.reader.media()
         self.assertEqual(m["running"], [])

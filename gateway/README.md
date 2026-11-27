@@ -103,8 +103,8 @@ of these sources, and a missing or corrupt source leaves its fields empty or
   `indexes`, `avg_query_ms`) and `stats` (`files`, `defs`, `refs`,
   `indexed_at`). The gateway does not open kuzu, because of its writer lock
   and the dependency. `files`, `defs` and `refs` come from the newest
-  successful `index` record, and `indexed_at` is the mtime of
-  `<store>/graph/graph.kuzu`.
+  successful `index` record, and `indexed_at` is the `ts` of
+  that same record (`null` when there is none), not a file mtime.
 - `media`: built from `<store>/media/jobs/*.json` (or `$FXLLA_MEDIA_OUT/jobs`).
   `running` holds jobs with status `running`, each with `elapsed_s` and
   `eta_s` (`elapsed / step * (total - step)`, `null` without progress).

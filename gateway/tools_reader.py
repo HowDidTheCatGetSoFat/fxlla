@@ -3,7 +3,7 @@
 Sources:
 - kb.jsonl and graph.jsonl in the fxlla state dir, through lib/fxlla_events.
 - <store>/kb/kb.db, opened read-only; never created.
-- <store>/graph/graph.kuzu, only its mtime (kuzu is never opened).
+- kuzu is never opened; graph.stats.indexed_at comes from graph.jsonl.
 - <store>/media/jobs/*.json (or $FXLLA_MEDIA_OUT/jobs), never written.
 
 Every section degrades to empty or None on any failure.
@@ -41,6 +41,7 @@ _PATH_RE = re.compile(
 
 # The only fields a media item may expose. argv, summary, output and log hold
 # the prompt and home-directory paths and are never copied.
+MEDIA_KINDS = ("image", "video", "voice", "edit", "upscale")
 MEDIA_FIELDS = ("id", "job", "media", "model", "steps", "width", "height",
                 "status", "created", "started", "finished", "peak_rss_mb",
                 "progress", "caller", "error")
@@ -237,13 +238,8 @@ class ToolsReader:
                 if r.get("kind") == "index" and r.get("ok") is True:
                     out["stats"].update({k: _num(r.get(k))
                                          for k in ("files", "defs", "refs")})
+                    out["stats"]["indexed_at"] = _num(r.get("ts"))
                     break
-        except Exception:
-            pass
-        try:
-            mt = os.stat(os.path.join(self.store, "graph",
-                                      "graph.kuzu")).st_mtime
-            out["stats"]["indexed_at"] = int(mt)
         except Exception:
             pass
         return out
@@ -288,6 +284,8 @@ class ToolsReader:
         if isinstance(item["model"], str) and item["model"][:1] in "/~":
             item["model"] = os.path.basename(item["model"].rstrip("/"))
         item["progress"] = _progress(rec.get("progress"))
+        kind = rec.get("media") or rec.get("kind")
+        item["media"] = kind if kind in MEDIA_KINDS else None
         return item
 
     def media(self):
