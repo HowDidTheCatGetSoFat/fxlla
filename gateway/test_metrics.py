@@ -403,5 +403,27 @@ class TestUsageChunkStripper(unittest.TestCase):
         self.assertEqual(s.consume(BODY + b"data: {"), BODY)
 
 
+class TestEngineReportTimingsFallback(unittest.TestCase):
+    def test_counts_come_from_timings_when_usage_is_absent(self):
+        r = metrics.engine_report(None, {
+            "cache_n": 0, "prompt_n": 12, "prompt_ms": 40.231,
+            "predicted_n": 8, "predicted_ms": 70.0})
+        self.assertEqual(r["prompt_tokens"], 12)
+        self.assertEqual(r["output_tokens"], 8)
+
+    def test_cached_tokens_count_toward_the_prompt(self):
+        r = metrics.engine_report(None, {
+            "cache_n": 8, "prompt_n": 4, "predicted_n": 3})
+        self.assertEqual(r["prompt_tokens"], 12)
+        self.assertEqual(r["cached_tokens"], 8)
+
+    def test_usage_wins_over_timings(self):
+        r = metrics.engine_report(
+            {"prompt_tokens": 5, "completion_tokens": 2},
+            {"cache_n": 0, "prompt_n": 12, "predicted_n": 8})
+        self.assertEqual(r["prompt_tokens"], 5)
+        self.assertEqual(r["output_tokens"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

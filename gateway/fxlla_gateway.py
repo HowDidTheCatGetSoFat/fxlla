@@ -1361,7 +1361,10 @@ TELEMETRY = telemetry.Telemetry()
 
 # Engines whose servers honor stream_options.include_usage. mtplx is left out:
 # it reports usage on its own terms and must not be sent options it may reject.
-_USAGE_INJECT_ENGINES = {"mlx", "gguf", "omlx"}
+# gguf is left out too: llama-server puts `timings` on the finish chunk, and
+# with include_usage it moves to the usage-only chunk the stripper removes, so
+# the client would lose it. Its counts come from `timings` instead.
+_USAGE_INJECT_ENGINES = {"mlx", "omlx"}
 
 
 class Handler(BaseHTTPRequestHandler):

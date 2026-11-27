@@ -12,7 +12,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
   events (loaded, evicted, exited, load failed) and the machine's memory, swap,
   pressure, GPU and disk. Every finished request now lands in `stats.jsonl`
   with those extra fields, added beside the old ones. For streamed requests
-  that did not ask for usage on the `mlx`, `gguf` and `omlx` engines the
+  that did not ask for usage on the `mlx` and `omlx` engines the
   gateway asks the engine for it and strips the extra chunk, so exact counts
   come back without the client seeing a byte it would not have seen before.
   The endpoint has no authentication and never carries prompt or answer text.

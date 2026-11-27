@@ -41,8 +41,9 @@ monitor mockup" override the earlier sections where they differ.
   - The 5000-line cap stays.
 - **Never record prompt or answer text, headers other than User-Agent, or
   keys.**
-- **The injection allowlist is exactly `{"mlx", "gguf", "omlx"}`.** Never
-  inject for `mtplx`.
+- **The injection allowlist is exactly `{"mlx", "omlx"}`.** Never inject
+  for `mtplx`, nor for `gguf` (llama-server moves `timings` to the usage-only
+  chunk, which the stripper would remove from the client's stream).
 - **Tests must pass on the Linux CI runner.** Nothing in a test may need
   `ioreg`, `vm_stat`, `sysctl`, or a real engine. Machine parsers are tested
   on captured text.

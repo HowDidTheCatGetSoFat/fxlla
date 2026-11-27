@@ -147,10 +147,20 @@ def engine_report(usage, timings):
     decode_ms = _ms(timings.get("predicted_ms"))
     if decode_ms is None:
         decode_ms = _secs_ms(usage.get("generation_duration"))
+    prompt_tokens = _int(usage.get("prompt_tokens"))
+    if prompt_tokens is None:
+        # llama-server: prompt_n counts only the tokens it evaluated, the
+        # cached ones are reported apart in cache_n.
+        pn = _int(timings.get("prompt_n"))
+        if pn is not None:
+            prompt_tokens = pn + (_int(timings.get("cache_n")) or 0)
+    output_tokens = _int(usage.get("completion_tokens"))
+    if output_tokens is None:
+        output_tokens = _int(timings.get("predicted_n"))
     return {
-        "prompt_tokens": _int(usage.get("prompt_tokens")),
+        "prompt_tokens": prompt_tokens,
         "cached_tokens": cached,
-        "output_tokens": _int(usage.get("completion_tokens")),
+        "output_tokens": output_tokens,
         "reasoning_tokens": _int(_sub(usage, "completion_tokens_details").get("reasoning_tokens")),
         "prompt_ms": prompt_ms,
         "decode_ms": decode_ms,

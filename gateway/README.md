@@ -72,9 +72,12 @@ Usage injection: to read exact token counts, the gateway adds
 `stream_options.include_usage` to a streamed request when the client did not
 ask for it, and removes the resulting usage-only chunk before the client sees
 it. A client that asked for usage gets its stream untouched. Injection is
-limited to the engines `mlx`, `gguf` and `omlx`, whose servers honor the
-option. `mtplx` is excluded: it reports usage on its own terms and must not be
-sent options it may reject.
+limited to the engines `mlx` and `omlx`, whose servers honor the option.
+`mtplx` is excluded: it reports usage on its own terms and must not be sent
+options it may reject. `gguf` is excluded because llama-server moves its
+`timings` object to the usage-only chunk when the option is set, so stripping
+that chunk would take `timings` from the client; the counts come from
+`timings` instead.
 
 `machine` holds unified memory, swap, memory pressure, GPU utilization and
 in-use memory, and free disk space, read without sudo and cached for about a

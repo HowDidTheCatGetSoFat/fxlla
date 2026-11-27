@@ -112,7 +112,7 @@ class TestGatewayE2E(unittest.TestCase):
 
         _Backend.mode = "ok"
         _Backend.last_body = None
-        self._register("gguf")
+        self._register("mlx")
 
         self.gateway = ThreadingHTTPServer(("127.0.0.1", 0), gw.Handler)
         self.gport = self.gateway.server_address[1]
@@ -178,7 +178,7 @@ class TestGatewayE2E(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         s = json.loads(lines[0])
         self.assertEqual(s["model"], "fake")
-        self.assertEqual(s["engine"], "gguf")
+        self.assertEqual(s["engine"], "mlx")
         self.assertEqual(s["source"], "gateway")
         self.assertGreater(s["ram_mb"], 0)   # real RSS of this test process
         self.assertIsNotNone(s["ttft_ms"])
@@ -205,6 +205,14 @@ class TestGatewayE2E(unittest.TestCase):
         self.assertEqual(out, _Backend.sent)
         self.assertIn(b'"usage"', out)
         self.assertEqual(self._last_row()["output_tokens"], 2)
+
+    def test_gguf_is_not_injected_and_keeps_its_timings(self):
+        # llama-server puts `timings` on the finish chunk; injecting would move
+        # it to a usage-only chunk the stripper removes.
+        self._register("gguf")
+        with urllib.request.urlopen(self._post(), timeout=10) as r:
+            r.read()
+        self.assertNotIn("stream_options", _Backend.last_body)
 
     def test_mtplx_is_never_injected(self):
         self._register("mtplx")
