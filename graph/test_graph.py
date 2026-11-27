@@ -4,6 +4,7 @@ import importlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -187,6 +188,7 @@ class _EventsBase(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.state = os.path.join(self.tmp, "state")
         self._saved_env = {k: os.environ.get(k)
                            for k in ("FXLLA_STATE_DIR", "FXLLA_CALLER")}

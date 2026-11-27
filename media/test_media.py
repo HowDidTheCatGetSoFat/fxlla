@@ -3500,8 +3500,10 @@ class TestJobWorkerOutput(unittest.TestCase):
         saved_popen = jobs.subprocess.Popen
         jobs.subprocess.Popen = lambda *a, **k: type("P", (), {"pid": 1})()
         self.addCleanup(setattr, jobs.subprocess, "Popen", saved_popen)
+        prev = os.environ.get("FXLLA_CALLER")
         os.environ["FXLLA_CALLER"] = "mcp"
-        self.addCleanup(os.environ.pop, "FXLLA_CALLER", None)
+        self.addCleanup(lambda: os.environ.pop("FXLLA_CALLER", None) if prev is None
+                        else os.environ.__setitem__("FXLLA_CALLER", prev))
         rec = jobs.submit("video", ["video", "p"], "p")
         self.assertTrue(rec["job"])
         self.assertEqual(rec["media"], "video")

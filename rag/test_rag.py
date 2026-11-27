@@ -4,6 +4,7 @@ import importlib
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -711,6 +712,7 @@ class TestKbEvents(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
         self.state = os.path.join(self.tmp, "state")
         self.saved = (core.KB_DIR, core.DB_PATH, core.Embedder,
                       os.environ.get("FXLLA_STATE_DIR"),
