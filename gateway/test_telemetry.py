@@ -502,6 +502,22 @@ class TestMediaReader(ReaderBase):
         for kept in ("a.png", "b.log", "d.txt", "f.py"):
             self.assertIn(kept, err)
 
+    def test_spaced_relative_and_url_paths_are_scrubbed_too(self):
+        cases = [
+            ("failed /Volumes/My Drive/x/a.png", ("Volumes", "My Drive", "/x"), "a.png"),
+            ("bad ../../Users/fx/secret/k.txt", ("Users", "secret", ".."), "k.txt"),
+            ("no models/foo/bar here", ("models", "foo"), "bar"),
+            ("GET https://h.com/p/q failed", ("/p", "/q"), "h.com"),
+        ]
+        for i, (text, banned, kept) in enumerate(cases):
+            self.write_job(job(i + 1, error=text))
+        got = {r["id"]: r["error"] for r in self.reader.media()["recent"]}
+        for i, (text, banned, kept) in enumerate(cases):
+            err = got[job(i + 1)["id"]]
+            for b in banned:
+                self.assertNotIn(b, err, text)
+            self.assertIn(kept, err, text)
+
     def test_graph_and_kb_errors_are_scrubbed_too(self):
         rec = {"ts": NOW, "kind": "query", "ok": False,
                "error": "cannot open /Volumes/WD/llm/graph/g.kuzu"}

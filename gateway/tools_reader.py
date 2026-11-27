@@ -29,9 +29,15 @@ RECENT_JOBS = 20
 ERROR_MAX = 200
 KB_BUSY_S = 0.2
 
-# An absolute-path token: starts with / or ~ at a word boundary and runs to
-# whitespace, a quote or a colon. Only its basename is ever shown.
-_PATH_RE = re.compile(r"(?<![\w.])[/~][^\s'\":]*")
+# A URL keeps its scheme and host; the path, query and credentials go.
+_URL_RE = re.compile(r"\b([a-zA-Z][a-zA-Z0-9+.-]*://)(?:[^\s'\"/@]*@)?([^\s'\"/?#]*)[^\s'\"]*")
+# A path token: absolute, home-relative or relative, with at least one slash.
+# A segment may hold up to three space-separated words ("My Drive"), so a
+# macOS path with spaces is cut whole. Only its basename is ever shown.
+_SEG = r"[^/\s'\":]+(?: [^/\s'\":]+){0,2}"
+_PATH_RE = re.compile(
+    r"(?<![\w.~/:@+-])(?:~[\w.-]*|\.{1,2}|[\w.@+-]+)?/(?:(?:%s)?/)*(?:%s)?"
+    % (_SEG, _SEG))
 
 # The only fields a media item may expose. argv, summary, output and log hold
 # the prompt and home-directory paths and are never copied.
@@ -73,13 +79,14 @@ def _scalar(v):
 def _basename(match):
     tok = match.group(0)
     name = os.path.basename(tok.rstrip("/"))
-    return name if name else tok if tok == "~" else ""
+    return name if name else tok
 
 
 def _clean_error(v):
     if not isinstance(v, str) or not v:
         return None
     line = v.strip().splitlines()[0] if v.strip() else ""
+    line = _URL_RE.sub(lambda m: m.group(1) + m.group(2), line)
     line = _PATH_RE.sub(_basename, line)
     return line[:ERROR_MAX]
 
