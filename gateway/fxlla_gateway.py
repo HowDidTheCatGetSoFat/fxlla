@@ -80,6 +80,7 @@ import ggufmeta  # noqa: E402  (local module, added to sys.path above)
 import metrics  # noqa: E402
 import telemetry  # noqa: E402
 import tools_reader  # noqa: E402
+import externals  # noqa: E402
 
 # Poll interval while waiting for a backend to answer. Small enough that a fast
 # model load is not rounded up to the next whole second.
@@ -1812,6 +1813,7 @@ BOOT_TS = int(time.time())
 VERSION = _git_version()
 MACHINE = telemetry.MachineSampler(MODELS_DIR)
 TOOLS = tools_reader.ToolsReader(STORE)
+EXTERNALS = externals.default_externals()
 
 
 def monitor_snapshot(port=None):
@@ -1830,6 +1832,10 @@ def monitor_snapshot(port=None):
         tools = TOOLS.snapshot()
     except Exception:       # a reader bug must never fail /monitor
         tools = tools_reader.empty_snapshot()
+    try:
+        ext = EXTERNALS.snapshot()
+    except Exception:       # same for the external engine probes
+        ext = externals.empty_externals()
     return {
         "schema_version": 1,
         "instance": {"pid": os.getpid(), "host": HOST, "port": port or PORT,
@@ -1849,6 +1855,7 @@ def monitor_snapshot(port=None):
         "kb": tools["kb"],
         "graph": tools["graph"],
         "media": tools["media"],
+        "externals": ext,
     }
 
 # Checked often enough that "10 minutes" is not really 15, cheap enough to

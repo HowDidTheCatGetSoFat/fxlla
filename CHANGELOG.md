@@ -6,6 +6,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 ## [Unreleased]
 
 ### Added
+- `/monitor` gains an `externals` section for Strata, Ollama, LM Studio and
+  ComfyUI, probed on demand over HTTP to 127.0.0.1 under a 1 s shared deadline,
+  cached for 2 s, served stale when an engine is slow and backed off when it is
+  down. Strata's key is read from its launch files and is never reported.
 - `GET /monitor` on the gateway: one JSON snapshot of the resident backends and
   what each is doing, the load queue, totals since boot, rate series, the last
   requests with their token counts, cache hits, timings and client, lifecycle

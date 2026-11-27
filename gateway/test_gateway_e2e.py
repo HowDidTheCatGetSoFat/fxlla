@@ -116,8 +116,29 @@ class _DummyProc:
         pass
 
 
+def _closed_port_externals():
+    """Four probes aimed at a closed local port; never a real engine."""
+    import socket
+    import ext_local
+    import ext_strata
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    url = "http://127.0.0.1:%d" % port
+    log = ext_local.OllamaLog(os.path.join(_STORE, "no-such-ollama.log"))
+    return gw.externals.Externals({
+        "strata": (url, ext_strata.StrataProbe(url, key_source=lambda: [])),
+        "ollama": (url, ext_local.ollama_probe(url, log)),
+        "lmstudio": (url, ext_local.lmstudio_probe(url)),
+        "comfyui": (url, ext_local.comfyui_probe([url])),
+    })
+
+
 class TestGatewayE2E(unittest.TestCase):
     def setUp(self):
+        self._real_externals = gw.EXTERNALS
+        gw.EXTERNALS = _closed_port_externals()
         self.backend = ThreadingHTTPServer(("127.0.0.1", 0), _Backend)
         self.bport = self.backend.server_address[1]
         self.bt = threading.Thread(target=self.backend.serve_forever, daemon=True)
@@ -163,6 +184,7 @@ class TestGatewayE2E(unittest.TestCase):
         self.fail("no row in stats file")
 
     def tearDown(self):
+        gw.EXTERNALS = self._real_externals
         self.gateway.shutdown()
         self.backend.shutdown()
         gw.MANAGER.backends.pop("fake", None)
@@ -403,11 +425,13 @@ class TestGatewayE2E(unittest.TestCase):
         self.assertEqual(set(m), {
             "schema_version", "instance", "backends", "resident_mb", "work",
             "totals", "series", "ttft_p95_ms", "day", "recent", "events",
-            "machine", "kb", "graph", "media"})
+            "machine", "kb", "graph", "media", "externals"})
         self.assertEqual(set(m["kb"]), {"recent", "today", "bases", "db_bytes"})
         self.assertEqual(set(m["graph"]), {"recent", "today", "stats"})
         self.assertEqual(set(m["media"]), {"running", "queued", "recent",
                                            "today"})
+        self.assertEqual(set(m["externals"]),
+                         {"strata", "ollama", "lmstudio", "comfyui"})
         self.assertEqual(m["schema_version"], 1)
         self.assertEqual(m["instance"]["port"], self.gport)
         self.assertEqual(set(m["instance"]), {
