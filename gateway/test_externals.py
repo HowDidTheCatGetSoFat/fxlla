@@ -245,5 +245,106 @@ class ObserverTests(unittest.TestCase):
         self.assertNotIn(key, json.dumps(snap))
 
 
+class Scripted:
+    """Probe whose behaviour is a queue of callables."""
+
+    def __init__(self, *steps):
+        self.steps = list(steps)
+
+    def __call__(self, get):
+        return self.steps.pop(0)()
+
+
+class HardeningTests(unittest.TestCase):
+    def test_stale_up_not_served_after_newer_down(self):
+        clk = Clock()
+        release = threading.Event()
+
+        def ok():
+            return {"up": True, "url": "u"}
+
+        def refused():
+            raise ext_http.Refused()
+
+        def hang():
+            release.wait(5)
+            return {"up": True, "url": "u"}
+
+        ex = make({"e": ("u", Scripted(ok, refused, hang))}, clock=clk,
+                  deadline_s=0.05, ttl_s=0.0)
+        try:
+            self.assertTrue(ex.snapshot()["e"]["up"])
+            clk.t += 3
+            self.assertFalse(ex.snapshot()["e"]["up"])
+            clk.t += 17
+            snap = ex.snapshot()
+            self.assertFalse(snap["e"]["up"])
+        finally:
+            release.set()
+
+    def test_stale_age_is_capped(self):
+        clk = Clock()
+        release = threading.Event()
+
+        def ok():
+            return {"up": True, "url": "u"}
+
+        def hang():
+            release.wait(5)
+            return {"up": True, "url": "u"}
+
+        ex = make({"e": ("u", Scripted(ok, hang))}, clock=clk,
+                  deadline_s=0.05, ttl_s=0.0, stale_max_s=30.0,
+                  abandon_s=1000.0)
+        try:
+            ex.snapshot()
+            clk.t += 5
+            e = ex.snapshot()["e"]
+            self.assertTrue(e["up"] and e["stale"])
+            clk.t += 60
+            e = ex.snapshot()["e"]
+            self.assertFalse(e["up"])
+            self.assertEqual(e["down_reason"], "timeout")
+        finally:
+            release.set()
+
+    def test_stuck_probe_is_abandoned_and_retried(self):
+        clk = Clock()
+        release = threading.Event()
+
+        def hang():
+            release.wait(5)
+            return {"up": True, "url": "u", "n": "old"}
+
+        def ok():
+            return {"up": True, "url": "u", "n": "new"}
+
+        ex = make({"e": ("u", Scripted(hang, ok))}, clock=clk,
+                  deadline_s=0.05, ttl_s=0.0, abandon_s=30.0)
+        try:
+            self.assertFalse(ex.snapshot()["e"]["up"])
+            clk.t += 31
+            e = ex.snapshot()["e"]
+            self.assertEqual(e.get("n"), "new")
+        finally:
+            release.set()
+
+    def test_probe_threads_are_daemons(self):
+        release = threading.Event()
+
+        def hang():
+            release.wait(5)
+            return {"up": True, "url": "u"}
+
+        ex = make({"e": ("u", Scripted(hang))}, deadline_s=0.05)
+        try:
+            ex.snapshot()
+            ts = [t for t in threading.enumerate() if t.name.startswith("ext-probe")]
+            self.assertTrue(ts)
+            self.assertTrue(all(t.daemon for t in ts))
+        finally:
+            release.set()
+
+
 if __name__ == "__main__":
     unittest.main()
