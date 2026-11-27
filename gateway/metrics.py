@@ -106,7 +106,10 @@ def _num(v):
     # json.loads accepts NaN and Infinity; they are not measurements.
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    return v if math.isfinite(v) else None
+    # isfinite converts to float, which overflows on a huge int; ints are finite.
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    return v
 
 
 def _ms(v):

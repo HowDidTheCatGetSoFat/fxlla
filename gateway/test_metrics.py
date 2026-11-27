@@ -339,6 +339,14 @@ class TestEngineReport(unittest.TestCase):
         self.assertIsNone(r["prompt_ms"])
         self.assertIsNone(r["decode_ms"])
 
+    def test_huge_ints_do_not_raise(self):
+        big = 10 ** 400
+        r = metrics.engine_report(
+            {"prompt_tokens": big, "generation_duration": big}, {"prompt_ms": big})
+        self.assertEqual(r["prompt_tokens"], big)
+        self.assertEqual(r["prompt_ms"], big)
+        self.assertEqual(r["decode_ms"], big * 1000)
+
 
 if __name__ == "__main__":
     unittest.main()
