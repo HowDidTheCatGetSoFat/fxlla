@@ -1,0 +1,12 @@
+{
+ "live": {
+  "state": "generating",
+  "phase": "decode",
+  "prompt_read": 1000,
+  "prompt_total": 1000,
+  "generated": 50,
+  "max_tokens": 700,
+  "elapsed_s": 2.5,
+  "tok_s": 40.0
+ }
+}
