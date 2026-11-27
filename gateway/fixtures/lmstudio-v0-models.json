@@ -1,0 +1,4 @@
+{"object":"list","data":[
+{"id":"qwen3-4b","object":"model","type":"llm","publisher":"qwen","arch":"qwen3","compatibility_type":"gguf","quantization":"Q4_K_M","state":"loaded","max_context_length":32768,"loaded_context_length":4096},
+{"id":"text-embedding-nomic-embed-text-v1.5","object":"model","type":"embeddings","publisher":"nomic-ai","arch":"nomic-bert","compatibility_type":"gguf","quantization":"Q4_K_M","state":"not-loaded","max_context_length":2048}
+]}

@@ -1,0 +1,1 @@
+{"models":[{"name":"qwen3:8b","model":"qwen3:8b","size":6654289920,"digest":"0000","details":{"parent_model":"","format":"gguf","family":"qwen3","families":["qwen3"],"parameter_size":"8.2B","quantization_level":"Q4_K_M"},"expires_at":"2099-01-01T00:00:00.123456789Z","size_vram":5333539840,"context_length":4096}]}
