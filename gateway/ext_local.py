@@ -1,6 +1,7 @@
 """Probes for Ollama, LM Studio and ComfyUI. Parsers never raise."""
 import datetime
 import json
+import math
 import re
 import statistics
 from pathlib import Path
@@ -37,11 +38,15 @@ _UNIT_MS = {
     "h": 3600000.0,
 }
 
+_LIMIT = 1e18
 
-def _num(x):
-    if isinstance(x, bool) or not isinstance(x, (int, float)):
+
+def _num(v):
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    return x
+    if isinstance(v, float):
+        return v if math.isfinite(v) and abs(v) < _LIMIT else None
+    return v if abs(v) < _LIMIT else None
 
 
 def _dict(x):

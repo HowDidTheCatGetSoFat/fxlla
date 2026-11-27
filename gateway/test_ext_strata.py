@@ -126,6 +126,52 @@ class Parse(unittest.TestCase):
                     self.assertIsInstance(ext_strata.parse(a, b, c, "ok"), dict)
 
 
+class NonFinite(unittest.TestCase):
+    INF = float("inf")
+    NAN = float("nan")
+
+    def test_num_rejects_non_finite_and_absurd(self):
+        for v in (self.INF, -self.INF, self.NAN, 10 ** 400):
+            self.assertIsNone(ext_strata._num(v))
+        self.assertEqual(ext_strata._num(5), 5)
+
+    def test_bad_row_does_not_wipe_entry(self):
+        tel = {"model": {"id": "m", "context": self.NAN},
+               "instance": {"state": "ready"},
+               "ram": {"used": self.INF, "total": 1048576},
+               "work": {"active": self.INF},
+               "recent": [{"time": self.NAN, "decode_ms": 10 ** 400},
+                          {"time": 100, "output_tokens": 5, "decode_ms": 1000}]}
+        r = ext_strata.parse({"model": "h"}, tel, None, "ok")
+        self.assertEqual(r["model"], "m")
+        self.assertEqual(r["state"], "ready")
+        self.assertIsNone(r["context"])
+        self.assertIsNone(r["ram"]["used_mb"])
+        self.assertEqual(r["ram"]["total_mb"], 1)
+        self.assertIsNone(r["work"]["active"])
+        self.assertEqual(len(r["recent"]), 1)
+        json.dumps(r, allow_nan=False)
+
+    def test_exception_in_one_row_skips_only_that_row(self):
+        orig = ext_strata.row
+        calls = []
+
+        def boom(rec, model, boot):
+            calls.append(rec)
+            if rec == "bad":
+                raise ValueError("x")
+            return orig(rec, model, boot)
+        ext_strata.row = boom
+        try:
+            r = ext_strata.parse(None, {"model": {"id": "m"},
+                                        "recent": ["bad", {"time": 5}]},
+                                 None, "ok")
+        finally:
+            ext_strata.row = orig
+        self.assertEqual(r["model"], "m")
+        self.assertEqual(len(r["recent"]), 1)
+
+
 class Probe(unittest.TestCase):
     def test_probe_key_flow(self):
         calls = []

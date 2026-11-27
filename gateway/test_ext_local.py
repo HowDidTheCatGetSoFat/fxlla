@@ -143,6 +143,26 @@ class ParserTests(unittest.TestCase):
             self.assertIsInstance(ext_local.parse_lmstudio(a), dict)
 
 
+class NonFiniteTests(unittest.TestCase):
+    def test_ollama_non_finite_never_raises(self):
+        inf = float("inf")
+        nan = float("nan")
+        ps = {"models": [{"name": "a", "size": nan, "size_vram": inf,
+                          "context_length": nan}]}
+        tags = {"models": [{"name": "a", "size": inf}]}
+        r = ext_local.parse_ollama(ps, tags, {"requests": 0, "median_ms": None})
+        json.dumps(r, allow_nan=False)
+        self.assertIsNone(r["loaded"][0]["size_mb"])
+        self.assertIsNone(r["loaded"][0]["context"])
+
+    def test_comfyui_non_finite_never_raises(self):
+        nan = float("nan")
+        stats = {"system": {"ram_total": nan, "ram_free": 1},
+                 "devices": [{"vram_total": float("inf"), "vram_free": 1}]}
+        r = ext_local.parse_comfyui(stats, {})
+        json.dumps(r, allow_nan=False)
+
+
 class ProbeTests(unittest.TestCase):
     def test_comfyui_fallback_url(self):
         calls = []

@@ -1,6 +1,7 @@
 """Strata probe for /monitor externals. The key is sent only as a Bearer
 header to the Strata base URL and never appears in an entry or error."""
 import json
+import math
 import os
 from pathlib import Path
 
@@ -15,11 +16,15 @@ LIVE_KEYS = ("phase", "prompt_read", "prompt_total", "generated",
              "max_tokens", "elapsed_s", "tok_s")
 LAUNCH_DIR = Path.home() / ".local/state/strata/launch"
 
+_LIMIT = 1e18
+
 
 def _num(v):
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    return v
+    if isinstance(v, float):
+        return v if math.isfinite(v) and abs(v) < _LIMIT else None
+    return v if abs(v) < _LIMIT else None
 
 
 def _dict(v):
@@ -118,7 +123,10 @@ def _parse(health, telemetry, metrics, auth):
     rows = t.get("recent")
     if isinstance(rows, list):
         for r in rows:
-            e = row(r, model, inst.get("boot_time"))
+            try:
+                e = row(r, model, inst.get("boot_time"))
+            except Exception:
+                e = None
             if e is not None:
                 recent.append(e)
         recent.sort(key=lambda e: e["ts"], reverse=True)
