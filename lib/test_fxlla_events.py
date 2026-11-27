@@ -160,11 +160,39 @@ class TestReadTail(Base):
     def test_torn_first_line_in_tail_skipped(self):
         for i in range(2000):
             ev.append("kb", {"i": i, "pad": "p" * 100})
-        recs = ev.read_tail("kb", 5000)
-        self.assertEqual(recs[0]["i"], 1999)
-        self.assertGreater(len(recs), 100)
-        ids = [r["i"] for r in recs]
-        self.assertEqual(ids, list(range(1999, 1999 - len(ids), -1)))
+        size = os.path.getsize(self.path())
+        self.assertGreater(size, 4 * 65536)
+        recs = ev.read_tail("kb", 50)
+        self.assertEqual([r["i"] for r in recs], list(range(1999, 1949, -1)))
+        self.assertTrue(all(r["pad"] == "p" * 100 for r in recs))
+
+    def test_torn_first_line_dropped_with_small_chunk(self):
+        for i in range(40):
+            ev.append("kb", {"i": i, "pad": "p" * 100})
+        old = ev._TAIL_CHUNK
+        ev._TAIL_CHUNK = 256
+        try:
+            recs = ev.read_tail("kb", 10)
+        finally:
+            ev._TAIL_CHUNK = old
+        self.assertEqual([r["i"] for r in recs], list(range(39, 29, -1)))
+
+    def test_cut_off_partial_line_not_returned(self):
+        # The seek can cut a line so that its tail alone parses as a record.
+        # The torn first line must be dropped, not parsed.
+        tail = b'{"i": 1}\nbad\n{"i": 2}\nbad\n{"i": 3}\nbad\n'
+        torn = b'{"i": "torn"}\n'
+        with open(self.path(), "wb") as f:
+            f.write(b'{"i": 0}\n' * 20 + b"AAAAAAAAAA" + torn + tail)
+        old = ev._TAIL_CHUNK
+        # One read that starts exactly at the "{": the first buffered line is
+        # the torn suffix of the A-prefixed line and parses on its own.
+        ev._TAIL_CHUNK = len(tail) + len(torn)
+        try:
+            recs = ev.read_tail("kb", 5)
+        finally:
+            ev._TAIL_CHUNK = old
+        self.assertEqual([r["i"] for r in recs], [3, 2, 1])
 
     def test_ignores_rotated_file(self):
         with open(self.path() + ".1", "w") as f:
