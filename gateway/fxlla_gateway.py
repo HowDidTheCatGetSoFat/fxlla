@@ -79,6 +79,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ggufmeta  # noqa: E402  (local module, added to sys.path above)
 import metrics  # noqa: E402
 import telemetry  # noqa: E402
+import tools_reader  # noqa: E402
 
 # Poll interval while waiting for a backend to answer. Small enough that a fast
 # model load is not rounded up to the next whole second.
@@ -1810,6 +1811,7 @@ def _git_version():
 BOOT_TS = int(time.time())
 VERSION = _git_version()
 MACHINE = telemetry.MachineSampler(MODELS_DIR)
+TOOLS = tools_reader.ToolsReader(STORE)
 
 
 def monitor_snapshot(port=None):
@@ -1824,6 +1826,10 @@ def monitor_snapshot(port=None):
         oldest = int(time.monotonic() - started) if started is not None else None
     snap = TELEMETRY.snapshot()
     machine = MACHINE.sample()
+    try:
+        tools = TOOLS.snapshot()
+    except Exception:       # a reader bug must never fail /monitor
+        tools = tools_reader.empty_snapshot()
     return {
         "schema_version": 1,
         "instance": {"pid": os.getpid(), "host": HOST, "port": port or PORT,
@@ -1840,6 +1846,9 @@ def monitor_snapshot(port=None):
         "recent": snap["recent"],
         "events": snap["events"],
         "machine": machine,
+        "kb": tools["kb"],
+        "graph": tools["graph"],
+        "media": tools["media"],
     }
 
 # Checked often enough that "10 minutes" is not really 15, cheap enough to

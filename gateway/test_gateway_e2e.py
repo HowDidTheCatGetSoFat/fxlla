@@ -21,6 +21,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 _STORE = tempfile.mkdtemp(prefix="fxlla-e2e-")
 os.environ["FXLLA_STORE"] = _STORE
+_STATE = os.path.join(_STORE, "state")
+os.makedirs(_STATE, exist_ok=True)
+os.environ["FXLLA_STATE_DIR"] = _STATE
+os.environ.pop("FXLLA_MEDIA_OUT", None)
 os.makedirs(os.path.join(_STORE, "models", "fake"), exist_ok=True)
 
 gw = importlib.import_module("fxlla_gateway")
@@ -399,7 +403,11 @@ class TestGatewayE2E(unittest.TestCase):
         self.assertEqual(set(m), {
             "schema_version", "instance", "backends", "resident_mb", "work",
             "totals", "series", "ttft_p95_ms", "day", "recent", "events",
-            "machine"})
+            "machine", "kb", "graph", "media"})
+        self.assertEqual(set(m["kb"]), {"recent", "today", "bases", "db_bytes"})
+        self.assertEqual(set(m["graph"]), {"recent", "today", "stats"})
+        self.assertEqual(set(m["media"]), {"running", "queued", "recent",
+                                           "today"})
         self.assertEqual(m["schema_version"], 1)
         self.assertEqual(m["instance"]["port"], self.gport)
         self.assertEqual(set(m["instance"]), {
@@ -452,6 +460,53 @@ class TestGatewayE2E(unittest.TestCase):
         self._last_row()
         _, raw = self._monitor()
         self.assertNotIn(b"SECRET-PROMPT-TEXT", raw)
+
+    def test_monitor_media_never_leaks_prompt_or_paths(self):
+        fake_home = "/Users/fake-home-xyz"
+        d = os.path.join(_STORE, "media", "jobs")
+        os.makedirs(d, exist_ok=True)
+        rec = {"id": "1700000000-abc123", "kind": "image", "job": True,
+               "media": "image", "status": "failed", "model": "flux",
+               "steps": 4, "width": 512, "height": 512, "peak_rss_mb": 9,
+               "progress": None, "caller": "mcp", "pid": 1,
+               "created": time.time() - 20, "started": time.time() - 10,
+               "finished": time.time() - 5,
+               "argv": ["gen", "--prompt", "DISTINCT-PROMPT-QZX"],
+               "summary": "DISTINCT-PROMPT-QZX on a beach",
+               "output": fake_home + "/Pictures/out.png",
+               "log": fake_home + "/logs/x.log",
+               "error": "first line\nDISTINCT-PROMPT-QZX second"}
+        path = os.path.join(d, rec["id"] + ".json")
+        with open(path, "w") as f:
+            json.dump(rec, f)
+        real = gw.TOOLS
+        # gw may have been imported by another suite with a different store.
+        gw.TOOLS = gw.tools_reader.ToolsReader(_STORE)
+        try:
+            _, raw = self._monitor()
+        finally:
+            os.remove(path)
+            gw.TOOLS = real
+        self.assertNotIn(b"DISTINCT-PROMPT-QZX", raw)
+        self.assertNotIn(b"fake-home-xyz", raw)
+        recent = json.loads(raw)["media"]["recent"]
+        self.assertEqual(recent[0]["id"], rec["id"])
+        self.assertEqual(recent[0]["error"], "first line")
+
+    def test_monitor_survives_a_broken_reader(self):
+        real = gw.TOOLS
+        class Boom:
+            def snapshot(self):
+                raise RuntimeError("x")
+        gw.TOOLS = Boom()
+        try:
+            status, raw = self._monitor()
+        finally:
+            gw.TOOLS = real
+        self.assertEqual(status, 200)
+        m = json.loads(raw)
+        self.assertEqual(m["kb"]["recent"], [])
+        self.assertEqual(m["media"]["running"], [])
 
 
 if __name__ == "__main__":

@@ -40,7 +40,8 @@ proxied response. Embeddings and non-generative endpoints are not timed.
 `GET /monitor` (also `/v1/monitor`) returns one JSON object with everything the
 gateway knows about itself. `/health` is unchanged. The top-level keys are
 `schema_version` (1), `instance`, `backends`, `resident_mb`, `work`, `totals`,
-`series`, `ttft_p95_ms`, `day`, `recent`, `events` and `machine`.
+`series`, `ttft_p95_ms`, `day`, `recent`, `events`, `machine`, `kb`, `graph`
+and `media`.
 
 Each finished completion request is also appended to `stats.jsonl`. The
 fields are only ever added to, so older readers keep working. A field the
@@ -84,6 +85,54 @@ in-use memory, and free disk space, read without sudo and cached for about a
 second. All commands share a 2 second budget per sample; a command that is
 missing (on Linux) or hangs leaves its fields `null` and `/monitor` still
 answers.
+
+### kb, graph and media sections
+
+`kb`, `graph` and `media` are read-only views of work that does not go through
+the gateway. The gateway only reads; it never writes, creates or repairs any
+of these sources, and a missing or corrupt source leaves its fields empty or
+`null`. A reader failure never fails `/monitor`.
+
+- `kb`: `recent` (the last 50 records of `kb.jsonl`, newest first), `today`
+  (`searches`, `adds`, `avg_search_ms`, `cold_starts`), `bases` (one row of
+  `kb`, `sources`, `chunks` per knowledge base) and `db_bytes`. `bases` comes
+  from one read-only SQLite query on `<store>/kb/kb.db` (1 s busy timeout,
+  cached 10 s). The db is never created: when it is missing, `bases` is `[]`
+  and `db_bytes` is `null`.
+- `graph`: `recent` (last 50 records of `graph.jsonl`), `today` (`queries`,
+  `indexes`, `avg_query_ms`) and `stats` (`files`, `defs`, `refs`,
+  `indexed_at`). The gateway does not open kuzu, because of its writer lock
+  and the dependency. `files`, `defs` and `refs` come from the newest
+  successful `index` record, and `indexed_at` is the mtime of
+  `<store>/graph/graph.kuzu`.
+- `media`: built from `<store>/media/jobs/*.json` (or `$FXLLA_MEDIA_OUT/jobs`).
+  `running` holds jobs with status `running`, each with `elapsed_s` and
+  `eta_s` (`elapsed / step * (total - step)`, `null` without progress).
+  `queued` holds queued jobs. `recent` holds the last 20 finished jobs, newest
+  finish first. `today` is `jobs`, `done`, `failed` and `gpu_s`, the sum of
+  `finished - started` over today's finished jobs. A queued or running job
+  whose pid is gone is reported as `died` in `recent` (counted as failed
+  today), by the same rule as `jobs._reap` but without writing to the record.
+
+Notes and caveats:
+
+- The event logs are appended oldest first. The reader takes the tail of the
+  file, so `recent` is in append order, newest first, not sorted by `ts`.
+- "Today" is the local calendar date. The `today` aggregates of `kb` and
+  `graph` are computed from the newest 5000 records of the log, cached for
+  2 s. With more than 5000 records in a day they cover only the newest 5000,
+  so the counts are a lower bound. Only the live file is read, not the
+  rotated `.jsonl.1`, so right after a rotation they can undercount.
+- The jobs directory is listed at most once per 2 s.
+- Privacy: a media item exposes only `id`, `job`, `media`, `model`, `steps`,
+  `width`, `height`, `status`, `created`, `started`, `finished`,
+  `peak_rss_mb`, `progress`, `caller` and `error`, plus `elapsed_s` and
+  `eta_s` for running jobs. `error` is cut to its first line and 200
+  characters, with the home directory replaced by `~`. The job's `argv`,
+  `summary`, `output`, `log` and `pid` are never copied: they carry the prompt
+  and home-directory paths, and `/monitor` has no authentication. kb and graph
+  records are likewise reduced to a fixed field list and carry no query or
+  chunk text.
 
 `/monitor` has no authentication. On a loopback bind that is harmless; on a
 LAN bind (`FXLLA_HOST=0.0.0.0`) anyone who can reach the port can read it. It
