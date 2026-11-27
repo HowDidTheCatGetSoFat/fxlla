@@ -3333,12 +3333,32 @@ class TestJobWorkerOutput(unittest.TestCase):
         self.assertEqual(len(err), 800)
         self.assertTrue(err.endswith("THE END"))
 
-    def test_warnings_are_found_and_not_duplicated(self):
-        self._gen("import sys\nsys.stderr.write('fxlla-warning: one\\nfxlla-warning: one\\n')\n"
+    def test_warnings_keep_their_order_and_are_not_deduplicated(self):
+        # Main did not dedupe, so a repeated line stays repeated.
+        self._gen("import sys\nsys.stderr.write('fxlla-warning: one\\nfxlla-warning: two\\n"
+                  "fxlla-warning: one\\n')\n"
                   "print('/out/x.png')\n")
         job_id = self._queued()
         jobs.run(job_id)
-        self.assertEqual(jobs._read(job_id)["warnings"], ["one"])
+        self.assertEqual(jobs._read(job_id)["warnings"], ["one", "two", "one"])
+
+    def test_the_hf_root_warning_from_env_reaches_the_job_warnings(self):
+        mdir = os.path.dirname(os.path.abspath(media.__file__))
+        self._gen("import os, sys\n"
+                  "sys.path.insert(0, %r)\n"
+                  "os.environ['FXLLA_MEDIA_HF_HOME'] = '/a:/b'\n"
+                  "import generate\n"
+                  "generate.weights.hf_home_for = lambda *a, **k: ('/a', ['org/model'])\n"
+                  "generate._env('image', 'krea2')\n"
+                  "print('/out/x.png')\n" % mdir)
+        os.environ["FXLLA_STORE"] = self.tmp
+        self.addCleanup(os.environ.pop, "FXLLA_STORE", None)
+        job_id = self._queued()
+        jobs.run(job_id)
+        warned = jobs._read(job_id).get("warnings") or []
+        self.assertEqual(len(warned), 1)
+        self.assertIn("cached under a different FXLLA_MEDIA_HF_HOME root", warned[0])
+        self.assertIn("org/model", warned[0])
 
     def test_a_submitted_job_has_the_new_fields(self):
         saved_popen = jobs.subprocess.Popen

@@ -284,9 +284,7 @@ def run(job_id):
         warned = []
         for ln in _log_text(log).splitlines():
             if ln.startswith(WARNING_MARK):
-                text = ln[len(WARNING_MARK):]
-                if text not in warned:
-                    warned.append(text)
+                warned.append(ln[len(WARNING_MARK):])
         notify(_update(job_id, status="done", finished=time.time(),
                        output=lines[-1],
                        **({"warnings": warned} if warned else {})))

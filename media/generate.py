@@ -440,6 +440,14 @@ def _lora_repo_ids(loras):
     return ids
 
 
+def warn(text):
+    """Print one warning line. In a job the relayed backend output shares this
+    stream, so the lines jobs.run collects as the `warnings` field carry their
+    own prefix. Every warning generate.py prints itself goes through here."""
+    prefix = "fxlla-warning: " if os.environ.get("FXLLA_JOB_ID") else "warning: "
+    print(prefix + text, file=sys.stderr)
+
+
 def _env(kind=None, model=None, extras=(), repos=()):
     """Environment for a backend, with HF_HOME resolved to ONE cache root.
 
@@ -457,10 +465,9 @@ def _env(kind=None, model=None, extras=(), repos=()):
     if unreachable:
         # Say it rather than let a surprise re-download of tens of GB be the
         # first sign. See `fxlla doctor` for the same warning at rest.
-        sys.stderr.write(
-            "warning: these weights are cached under a different "
-            "FXLLA_MEDIA_HF_HOME root than the one this render uses (%s), so "
-            "they will be fetched again: %s\n" % (root, ", ".join(unreachable)))
+        warn("these weights are cached under a different "
+             "FXLLA_MEDIA_HF_HOME root than the one this render uses (%s), so "
+             "they will be fetched again: %s" % (root, ", ".join(unreachable)))
     return env
 
 
@@ -1761,11 +1768,8 @@ def backend_warnings(stderr):
 
 
 def _report_warnings(stderr):
-    # In a job the relayed backend output shares this stream, so the lines
-    # jobs.run collects as the `warnings` field carry their own prefix.
-    prefix = "fxlla-warning: " if os.environ.get("FXLLA_JOB_ID") else "warning: "
     for text in backend_warnings(stderr):
-        print(prefix + text, file=sys.stderr)
+        warn(text)
 
 
 def _median(values):
