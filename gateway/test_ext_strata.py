@@ -1,11 +1,13 @@
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-import ext_http
-import ext_strata
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ext_http  # noqa: E402
+import ext_strata  # noqa: E402
 
 FIX = Path(__file__).parent / "fixtures"
 KEY = "test-key-not-real"

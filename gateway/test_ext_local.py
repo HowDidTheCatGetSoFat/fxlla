@@ -1,11 +1,14 @@
 import datetime
+import os
+import sys
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-import ext_local
-from ext_http import ProbeError, Refused
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ext_local  # noqa: E402
+from ext_http import ProbeError, Refused  # noqa: E402
 
 FX = Path(__file__).parent / "fixtures"
 D27 = datetime.date(2026, 11, 27)
