@@ -31,6 +31,14 @@ import ast
 import json
 import os
 import sys
+import time
+
+sys.path.append(os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+try:
+    import fxlla_events
+except Exception:  # telemetry is optional: never block the tool on it
+    fxlla_events = None
 
 import tsextract  # tree-sitter extraction for non-Python files (lazy heavy deps)
 
@@ -206,6 +214,7 @@ def cmd_index(args):
         total_refs += len(refs)
     _rebuild_calls(con)
     print(f"indexed {indexed} files: {total_defs} defs, {total_refs} refs")
+    return indexed, total_defs, total_refs
 
 
 def cmd_unused(args):
@@ -217,9 +226,9 @@ def cmd_unused(args):
         "MATCH (d:Def) WHERE NOT d.name STARTS WITH '__' "
         "AND NOT EXISTS { MATCH (r:Ref) WHERE r.name = d.name } "
         "RETURN d.qualname, d.kind, d.file, d.line ORDER BY d.file, d.line"))
-    _emit(args,
-          [{"qualname": q, "kind": k, "file": f, "line": ln} for q, k, f, ln in rows],
-          lambda r: f"{r['kind']:8} {r['qualname']}  {r['file']}:{r['line']}")
+    return _emit(args,
+                 [{"qualname": q, "kind": k, "file": f, "line": ln} for q, k, f, ln in rows],
+                 lambda r: f"{r['kind']:8} {r['qualname']}  {r['file']}:{r['line']}")
 
 
 def cmd_stats(args):
@@ -264,12 +273,13 @@ def cmd_rm(_args):
 def _emit(args, items, fmt):
     if getattr(args, "json", False):
         print(json.dumps(items))
-        return
+        return len(items)
     if not items:
         print("(none)")
-        return
+        return 0
     for it in items:
         print(fmt(it))
+    return len(items)
 
 
 def cmd_def(args):
@@ -278,9 +288,9 @@ def cmd_def(args):
         "MATCH (d:Def) WHERE d.name = $n OR d.qualname = $n "
         "RETURN d.qualname, d.kind, d.file, d.line ORDER BY d.file, d.line",
         {"n": args.name}))
-    _emit(args,
-          [{"qualname": q, "kind": k, "file": f, "line": ln} for q, k, f, ln in rows],
-          lambda r: f"{r['kind']:8} {r['qualname']}  {r['file']}:{r['line']}")
+    return _emit(args,
+                 [{"qualname": q, "kind": k, "file": f, "line": ln} for q, k, f, ln in rows],
+                 lambda r: f"{r['kind']:8} {r['qualname']}  {r['file']}:{r['line']}")
 
 
 def cmd_refs(args):
@@ -288,9 +298,9 @@ def cmd_refs(args):
     rows = _all(con.execute(
         "MATCH (r:Ref) WHERE r.name = $n "
         "RETURN r.file, r.line, r.caller ORDER BY r.file, r.line", {"n": args.name}))
-    _emit(args,
-          [{"file": f, "line": ln, "caller": c} for f, ln, c in rows],
-          lambda r: f"{r['file']}:{r['line']}" + (f"  in {r['caller']}" if r['caller'] else ""))
+    return _emit(args,
+                 [{"file": f, "line": ln, "caller": c} for f, ln, c in rows],
+                 lambda r: f"{r['file']}:{r['line']}" + (f"  in {r['caller']}" if r['caller'] else ""))
 
 
 def cmd_callers(args):
@@ -298,9 +308,9 @@ def cmd_callers(args):
     rows = _all(con.execute(
         "MATCH (r:Ref) WHERE r.name = $n AND r.caller <> '' "
         "RETURN DISTINCT r.caller, r.file ORDER BY r.caller", {"n": args.name}))
-    _emit(args,
-          [{"caller": c, "file": f} for c, f in rows],
-          lambda r: f"{r['caller']}  ({r['file']})")
+    return _emit(args,
+                 [{"caller": c, "file": f} for c, f in rows],
+                 lambda r: f"{r['caller']}  ({r['file']})")
 
 
 def cmd_impact(args):
@@ -314,9 +324,60 @@ def cmd_impact(args):
         f"MATCH p = (a:Def)-[:CALLS*1..{depth}]->(t:Def) WHERE t.name = $n "
         "RETURN a.qualname AS caller, min(length(p)) AS depth "
         "ORDER BY depth, caller", {"n": args.name}))
-    _emit(args,
-          [{"depth": d, "caller": c} for c, d in rows],
-          lambda r: f"{'  ' * r['depth']}{r['caller']} (depth {r['depth']})")
+    return _emit(args,
+                 [{"depth": d, "caller": c} for c, d in rows],
+                 lambda r: f"{'  ' * r['depth']}{r['caller']} (depth {r['depth']})")
+
+
+# Telemetry: one record per query or index run in <state dir>/graph.jsonl, written
+# after the command finishes. It carries counts and timings only: never the symbol
+# asked about, and for an index only the basename of the first path.
+def _record(kind, fields, begin, error):
+    try:
+        if fxlla_events is None:
+            return
+        rec = {"kind": kind}
+        rec.update(fields)
+        rec["duration_ms"] = int((time.monotonic() - begin) * 1000)
+        rec["ok"] = error is None
+        rec["error"] = error
+        fxlla_events.append("graph", rec)
+    except Exception:
+        pass
+
+
+def _error_line(code):
+    text = str(code).strip().splitlines()
+    first = text[0] if text else ""
+    home = os.path.expanduser("~")
+    if home and home != "/":
+        first = first.replace(home, "~")
+    return first[:200]
+
+
+def _run_recorded(run, args):
+    """Run a query or index command and record it. Output and exit unchanged."""
+    is_index = args.cmd == "index"
+    fields = ({"repo": os.path.basename(os.path.normpath(args.paths[0])),
+               "files": None, "defs": None, "refs": None}
+              if is_index else {"query": args.cmd, "results": None})
+    begin = time.monotonic()
+    error = None
+    try:
+        got = run(args)
+        if is_index and got:
+            fields.update(files=got[0], defs=got[1], refs=got[2])
+        elif not is_index:
+            fields["results"] = got
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            error = _error_line(e.code) or "exit %s" % (e.code,)
+        raise
+    except BaseException as e:
+        error = _error_line("%s: %s" % (type(e).__name__, e)) or type(e).__name__
+        raise
+    finally:
+        _record("index" if is_index else "query", fields, begin, error)
 
 
 def main():
@@ -339,11 +400,15 @@ def main():
     sub.add_parser("ls")
     sub.add_parser("rm")
     args = p.parse_args()
-    {
+    run = {
         "index": cmd_index, "ls": cmd_ls, "rm": cmd_rm,
         "def": cmd_def, "refs": cmd_refs, "callers": cmd_callers,
         "impact": cmd_impact, "unused": cmd_unused, "stats": cmd_stats,
-    }[args.cmd](args)
+    }[args.cmd]
+    if args.cmd in ("index", "def", "refs", "callers", "impact", "unused"):
+        _run_recorded(run, args)
+    else:
+        run(args)
 
 
 if __name__ == "__main__":
