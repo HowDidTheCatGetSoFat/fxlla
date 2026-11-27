@@ -219,7 +219,12 @@ def cancel(job_id):
     pid = rec.get("pid")
     if pid:
         try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            if rec.get("job") is False:
+                # A sync run is not a session leader: its process group is the
+                # caller's shell pipeline or MCP server. Signal only the pid.
+                os.kill(pid, signal.SIGTERM)
+            else:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
             pass
     return _update(job_id, status="cancelled", finished=time.time())
@@ -237,40 +242,49 @@ def run(job_id):
             return
         _update(job_id, status="running", started=time.time(), pid=os.getpid())
         # Truncated at job start: a log is one run's output, not a history.
-        try:
-            open(log_path(job_id), "w").close()
-        except OSError:
-            pass
+        # The generator's stderr goes straight into the file, and a pump copies
+        # its stdout in as it arrives, so the log is live and survives a cancel
+        # or a kill -9 of the worker.
+        log = log_path(job_id)
         env = dict(os.environ, FXLLA_JOB_ID=job_id)
+        out_lines = []
         try:
-            proc = subprocess.run([sys.executable, GENERATE] + list(rec["argv"]),
-                                  capture_output=True, text=True, env=env)
+            open(log, "wb").close()
+            with open(log, "ab", buffering=0) as errfile:
+                proc = subprocess.Popen(
+                    [sys.executable, GENERATE] + list(rec["argv"]),
+                    stdout=subprocess.PIPE, stderr=errfile,
+                    stdin=subprocess.DEVNULL, env=env)
+                try:
+                    out_lines = _pump_stdout(proc.stdout, log)
+                finally:
+                    proc.stdout.close()
+                proc.wait()
         # A failure is announced too: eight minutes of waiting for nothing is
         # exactly what someone needs told, and silence reads as still running.
         except Exception as exc:  # the generator could not even start
+            _append_log(log, "generator could not start: %s\n" % exc)
             notify(_update(job_id, status="failed", finished=time.time(),
                            error=str(exc)))
             return
-        _write_log(job_id, proc)
         if proc.returncode != 0:
             notify(_update(job_id, status="failed", finished=time.time(),
-                           error=(proc.stderr.strip() or "generation failed")[-800:]))
+                           error=(_log_text(log).strip() or "generation failed")[-800:]))
             return
-        lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+        lines = [ln.strip() for ln in out_lines if ln.strip()]
         if not lines:
             notify(_update(job_id, status="failed", finished=time.time(),
                            error="generator returned no output path"))
             return
         # What the backend said on a run that worked. Only failures ever read
-        # stderr, so mflux's own "--steps is ignored" reached nobody: a caller
-        # asking for something the model discards was told by the backend and
-        # the message was deleted one layer up. The generator relays the
-        # backend's output in a job, so a raw "warning: " line can repeat one
-        # it printed itself: keep the first of each.
+        # stderr, so mflux's own "--steps is ignored" reached nobody. The
+        # generator relays the backend's raw output in a job, so only lines it
+        # marked itself (WARNING_MARK) count: a backend line that happens to
+        # start with "warning: " must not change this field.
         warned = []
-        for ln in proc.stderr.splitlines():
-            if ln.strip().startswith("warning: "):
-                text = ln.split("warning: ", 1)[1]
+        for ln in _log_text(log).splitlines():
+            if ln.startswith(WARNING_MARK):
+                text = ln[len(WARNING_MARK):]
                 if text not in warned:
                     warned.append(text)
         notify(_update(job_id, status="done", finished=time.time(),
@@ -278,15 +292,35 @@ def run(job_id):
                        **({"warnings": warned} if warned else {})))
 
 
-def _write_log(job_id, proc):
-    """Keep what the generator printed. It used to be captured and dropped, so
-    every job log was 0 bytes and a failed render could not be looked into."""
+# Prefix of the warning lines generate.py prints in a job (see _report_warnings).
+WARNING_MARK = "fxlla-warning: "
+
+
+def _append_log(path, text):
     try:
-        with open(log_path(job_id), "w", encoding="utf-8", errors="replace") as fh:
-            fh.write(proc.stderr or "")
-            fh.write(proc.stdout or "")
+        with open(path, "ab", buffering=0) as fh:
+            fh.write(text.encode("utf-8", "replace"))
     except OSError:
         pass
+
+
+def _log_text(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def _pump_stdout(stream, log):
+    """Copy the generator's stdout into the log line by line as it arrives and
+    return the lines. O_APPEND keeps each write whole beside stderr's."""
+    lines = []
+    with open(log, "ab", buffering=0) as fh:
+        for raw in iter(stream.readline, b""):
+            fh.write(raw)
+            lines.append(raw.decode("utf-8", "replace").rstrip("\n"))
+    return lines
 
 
 def _as(text):

@@ -1761,8 +1761,11 @@ def backend_warnings(stderr):
 
 
 def _report_warnings(stderr):
+    # In a job the relayed backend output shares this stream, so the lines
+    # jobs.run collects as the `warnings` field carry their own prefix.
+    prefix = "fxlla-warning: " if os.environ.get("FXLLA_JOB_ID") else "warning: "
     for text in backend_warnings(stderr):
-        print("warning: %s" % text, file=sys.stderr)
+        print(prefix + text, file=sys.stderr)
 
 
 def _median(values):

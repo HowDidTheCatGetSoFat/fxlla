@@ -5,6 +5,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -609,6 +610,27 @@ class TestQualityGate(unittest.TestCase):
         media._check_quality("image", self.png, boom)
 
 
+def _fake_popen(returncode, stdout, stderr):
+    """A stand-in for subprocess.Popen as jobs.run uses it: stdout is a pipe,
+    stderr is a file the worker handed over."""
+    import io
+
+    class _Proc(object):
+        def __init__(self, cmd, **kw):
+            self.returncode = returncode
+            self.stdout = io.BytesIO(stdout.encode())
+            if kw.get("stderr") not in (None, subprocess.PIPE, subprocess.STDOUT):
+                kw["stderr"].write(stderr.encode())
+                kw["stderr"].flush()
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+    return _Proc
+
+
 class TestJobs(unittest.TestCase):
     # Exercises the job lifecycle against a stand-in generator, so no model is
     # loaded: jobs.run shells out to jobs.GENERATE, which the tests replace.
@@ -682,6 +704,20 @@ class TestJobs(unittest.TestCase):
     def test_cancel_marks_cancelled(self):
         rec = self._record(status="queued")
         self.assertEqual(jobs.cancel(rec["id"])["status"], "cancelled")
+
+    def test_cancelling_a_sync_record_signals_only_its_pid(self):
+        # A sync run is not a session leader: its process group is the
+        # caller's shell or MCP server, which must not get the SIGTERM.
+        rec = self._record(status="running", pid=os.getpid(), job=False)
+        calls = []
+        saved = (jobs.os.killpg, jobs.os.kill)
+        self.addCleanup(lambda: (setattr(jobs.os, "killpg", saved[0]),
+                                 setattr(jobs.os, "kill", saved[1])))
+        jobs.os.killpg = lambda *a: calls.append(("killpg", a))
+        jobs.os.kill = lambda pid, sig: calls.append(("kill", (pid, sig)))
+        jobs.cancel(rec["id"])
+        self.assertEqual([c[0] for c in calls if c[0] == "killpg"], [])
+        self.assertIn(("kill", (os.getpid(), signal.SIGTERM)), calls)
 
     def test_cancel_leaves_finished_jobs_alone(self):
         rec = self._record(status="done", output="/tmp/x.png")
@@ -1580,9 +1616,7 @@ class TestBackendWarnings(unittest.TestCase):
                          % (failures, reports))
 
     def test_a_finished_job_carries_them(self):
-        class Proc(object):
-            returncode, stdout = 0, "/out/x.png\n"
-            stderr = "warning: --steps is ignored; presets define it.\n"
+        err = "fxlla-warning: --steps is ignored; presets define it.\n"
 
         jobs_dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, jobs_dir, True)
@@ -1590,8 +1624,9 @@ class TestBackendWarnings(unittest.TestCase):
         self.addCleanup(setattr, jobs, "JOBS_DIR", saved_dir)
         saved_notify, jobs.notify = jobs.notify, lambda rec: None
         self.addCleanup(setattr, jobs, "notify", saved_notify)
-        saved_run, jobs.subprocess.run = jobs.subprocess.run, lambda c, **k: Proc()
-        self.addCleanup(setattr, jobs.subprocess, "run", saved_run)
+        saved_run = jobs.subprocess.Popen
+        jobs.subprocess.Popen = _fake_popen(0, "/out/x.png\n", err)
+        self.addCleanup(setattr, jobs.subprocess, "Popen", saved_run)
         jobs._write({"id": "1785500000-abcdef", "kind": "image",
                      "status": "queued", "argv": ["image", "x"], "summary": "x",
                      "output": None, "error": None, "pid": None,
@@ -2361,10 +2396,6 @@ class TestJobNotification(unittest.TestCase):
 
     def test_the_worker_announces_both_outcomes(self):
         # The notify() calls have to be wired into run(), not merely exist.
-        class Proc(object):
-            def __init__(self, rc, out):
-                self.returncode, self.stdout, self.stderr = rc, out, "boom"
-
         for rc, stdout, expected in ((0, "/out/x.png\n", "done"),
                                      (1, "", "failed")):
             jobs_dir = tempfile.mkdtemp()
@@ -2374,7 +2405,9 @@ class TestJobNotification(unittest.TestCase):
             announced = []
             saved_notify, jobs.notify = jobs.notify, announced.append
             self.addCleanup(setattr, jobs, "notify", saved_notify)
-            jobs.subprocess.run = lambda cmd, **kw: Proc(rc, stdout)
+            saved_popen = jobs.subprocess.Popen
+            jobs.subprocess.Popen = _fake_popen(rc, stdout, "boom")
+            self.addCleanup(setattr, jobs.subprocess, "Popen", saved_popen)
             rec = jobs._write({"id": "1785500000-abcdef", "kind": "image",
                                "status": "queued", "argv": ["image", "x"],
                                "summary": "x", "output": None, "error": None,
@@ -3217,6 +3250,80 @@ class TestJobWorkerOutput(unittest.TestCase):
         self.assertIn("/out/x.png", log)
         self.assertNotIn("stale", log)
 
+    def test_the_log_fills_while_the_generator_runs(self):
+        # Streamed, not written at exit: a kill -9 or a cancel mid-render
+        # must still leave what the generator had said so far.
+        self._gen("import os, sys, time\n"
+                  "sys.stderr.write('early line\\n'); sys.stderr.flush()\n"
+                  "seen = 'BLIND'\n"
+                  "for _ in range(100):\n"
+                  "    if 'early line' in open(os.environ['TLOG']).read():\n"
+                  "        seen = 'SEEN'; break\n"
+                  "    time.sleep(0.05)\n"
+                  "print(seen)\n")
+        job_id = self._queued()
+        os.environ["TLOG"] = jobs.log_path(job_id)
+        self.addCleanup(os.environ.pop, "TLOG", None)
+        jobs.run(job_id)
+        self.assertEqual(jobs._read(job_id)["output"], "SEEN")
+
+    def test_the_log_interleaves_stdout_and_stderr_in_order(self):
+        self._gen("import sys\n"
+                  "sys.stderr.write('one\\n'); sys.stderr.flush()\n"
+                  "print('two', flush=True)\n"
+                  "import time; time.sleep(0.2)\n"
+                  "sys.stderr.write('three\\n'); sys.stderr.flush()\n"
+                  "print('/out/x.png')\n")
+        job_id = self._queued()
+        jobs.run(job_id)
+        with open(jobs.log_path(job_id)) as fh:
+            lines = fh.read().split()
+        self.assertEqual(lines[:3], ["one", "two", "three"])
+
+    def test_a_generator_that_cannot_start_leaves_its_reason_in_the_log(self):
+        job_id = self._queued()
+        saved = jobs.subprocess.Popen
+        def boom(*a, **k):
+            raise OSError("no such interpreter")
+        jobs.subprocess.Popen = boom
+        self.addCleanup(setattr, jobs.subprocess, "Popen", saved)
+        jobs.run(job_id)
+        self.assertEqual(jobs._read(job_id)["status"], "failed")
+        with open(jobs.log_path(job_id)) as fh:
+            self.assertIn("no such interpreter", fh.read())
+
+    def test_a_lowercase_backend_warning_line_is_not_a_job_warning(self):
+        # In job mode the backend's raw output is relayed into the stream
+        # jobs.run reads; only the generator's own marked lines count.
+        self._gen("import sys\n"
+                  "sys.stderr.write('warning: noise\\n')\n"
+                  "sys.stderr.write('fxlla-warning: real\\n')\n"
+                  "print('/out/x.png')\n")
+        job_id = self._queued()
+        jobs.run(job_id)
+        self.assertEqual(jobs._read(job_id)["warnings"], ["real"])
+
+    def test_the_generator_marks_its_warnings_only_in_a_job(self):
+        import io, contextlib
+        err = "UserWarning: --steps is ignored\n"
+        for job, expected in (("1", "fxlla-warning: --steps is ignored\n"),
+                              (None, "warning: --steps is ignored\n")):
+            saved = os.environ.get("FXLLA_JOB_ID")
+            if job:
+                os.environ["FXLLA_JOB_ID"] = job
+            else:
+                os.environ.pop("FXLLA_JOB_ID", None)
+            try:
+                buf = io.StringIO()
+                with contextlib.redirect_stderr(buf):
+                    media._report_warnings(err)
+            finally:
+                if saved is None:
+                    os.environ.pop("FXLLA_JOB_ID", None)
+                else:
+                    os.environ["FXLLA_JOB_ID"] = saved
+            self.assertEqual(buf.getvalue(), expected)
+
     def test_error_is_still_the_last_800_characters(self):
         self._gen("import sys\nsys.stderr.write('A' * 2000 + 'THE END')\n"
                   "sys.exit(1)\n")
@@ -3227,7 +3334,7 @@ class TestJobWorkerOutput(unittest.TestCase):
         self.assertTrue(err.endswith("THE END"))
 
     def test_warnings_are_found_and_not_duplicated(self):
-        self._gen("import sys\nsys.stderr.write('warning: one\\nwarning: one\\n')\n"
+        self._gen("import sys\nsys.stderr.write('fxlla-warning: one\\nfxlla-warning: one\\n')\n"
                   "print('/out/x.png')\n")
         job_id = self._queued()
         jobs.run(job_id)
