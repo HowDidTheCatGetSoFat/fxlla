@@ -11,6 +11,7 @@ Every section degrades to empty or None on any failure.
 import glob
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -28,6 +29,9 @@ RECENT_JOBS = 20
 ERROR_MAX = 200
 KB_BUSY_S = 0.2
 
+# An absolute-path token: starts with / or ~ at a word boundary and runs to
+# whitespace, a quote or a colon. Only its basename is ever shown.
+_PATH_RE = re.compile(r"(?<![\w.])[/~][^\s'\":]*")
 
 # The only fields a media item may expose. argv, summary, output and log hold
 # the prompt and home-directory paths and are never copied.
@@ -66,13 +70,17 @@ def _scalar(v):
     return v if v is None or isinstance(v, (bool, int, float, str)) else None
 
 
+def _basename(match):
+    tok = match.group(0)
+    name = os.path.basename(tok.rstrip("/"))
+    return name if name else tok if tok == "~" else ""
+
+
 def _clean_error(v):
     if not isinstance(v, str) or not v:
         return None
     line = v.strip().splitlines()[0] if v.strip() else ""
-    home = os.path.expanduser("~")
-    if len(home) > 1:
-        line = line.replace(home, "~")
+    line = _PATH_RE.sub(_basename, line)
     return line[:ERROR_MAX]
 
 

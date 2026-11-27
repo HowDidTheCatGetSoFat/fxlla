@@ -493,6 +493,25 @@ class TestMediaReader(ReaderBase):
         self.assertLessEqual(len(err), 200)
         self.assertNotIn(home, err)
 
+    def test_every_absolute_path_in_an_error_is_cut_to_its_basename(self):
+        self.write_job(job(1, error="failed /Volumes/ext/x/a.png then "
+                           "'/private/var/t/b.log' and ~/c/d.txt: /opt/e/f.py"))
+        err = self.reader.media()["recent"][0]["error"]
+        for banned in ("/Volumes", "/private", "/opt", "~/", "/x/", "/t/"):
+            self.assertNotIn(banned, err)
+        for kept in ("a.png", "b.log", "d.txt", "f.py"):
+            self.assertIn(kept, err)
+
+    def test_graph_and_kb_errors_are_scrubbed_too(self):
+        rec = {"ts": NOW, "kind": "query", "ok": False,
+               "error": "cannot open /Volumes/WD/llm/graph/g.kuzu"}
+        self.write_stream("graph", [rec])
+        self.write_stream("kb", [dict(rec, kind="search")])
+        for sect in (self.reader.graph(), self.reader.kb()):
+            err = sect["recent"][0]["error"]
+            self.assertNotIn("/", err)
+            self.assertIn("g.kuzu", err)
+
     def test_corrupt_and_odd_records_are_skipped(self):
         d = os.path.join(self.store, "media", "jobs")
         os.makedirs(d)
