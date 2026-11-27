@@ -114,6 +114,7 @@ def submit(kind, argv, summary=""):
            "summary": summary, "output": None, "error": None, "pid": None,
            "created": time.time(), "started": None, "finished": None,
            "log": log_path(job_id)}
+    rec.update(_telemetry_fields(kind, True))
     _write(rec)
     with open(log_path(job_id), "ab") as log:
         proc = subprocess.Popen(
@@ -125,6 +126,39 @@ def submit(kind, argv, summary=""):
     if (_read(job_id) or {}).get("status") == "queued":
         rec = _update(job_id, pid=proc.pid) or rec
     return rec
+
+
+def _telemetry_fields(media, is_job):
+    """The fields the monitor reads. generate.py fills the None ones in."""
+    return {"job": is_job, "media": media, "model": None, "steps": None,
+            "width": None, "height": None, "peak_rss_mb": None,
+            "progress": None, "caller": os.environ.get("FXLLA_CALLER", "cli")}
+
+
+def update(job_id, **fields):
+    """_update that never raises: telemetry must not fail a render."""
+    try:
+        return _update(job_id, **fields)
+    except Exception:
+        return None
+
+
+def begin_sync(media, fields, argv=(), summary=""):
+    """Record a run that has no worker (no --async). Returns its id, or None
+    when the record cannot be written, which must not stop the render."""
+    try:
+        now = time.time()
+        job_id = new_id()
+        rec = {"id": job_id, "kind": media, "status": "running",
+               "argv": list(argv), "summary": summary, "output": None,
+               "error": None, "pid": os.getpid(), "created": now,
+               "started": now, "finished": None, "log": None}
+        rec.update(_telemetry_fields(media, False))
+        rec.update(fields)
+        _write(rec)
+        return job_id
+    except Exception:
+        return None
 
 
 def get(job_id):
@@ -202,15 +236,22 @@ def run(job_id):
         if rec is None or rec["status"] not in ACTIVE:
             return
         _update(job_id, status="running", started=time.time(), pid=os.getpid())
+        # Truncated at job start: a log is one run's output, not a history.
+        try:
+            open(log_path(job_id), "w").close()
+        except OSError:
+            pass
+        env = dict(os.environ, FXLLA_JOB_ID=job_id)
         try:
             proc = subprocess.run([sys.executable, GENERATE] + list(rec["argv"]),
-                                  capture_output=True, text=True, env=os.environ)
+                                  capture_output=True, text=True, env=env)
         # A failure is announced too: eight minutes of waiting for nothing is
         # exactly what someone needs told, and silence reads as still running.
         except Exception as exc:  # the generator could not even start
             notify(_update(job_id, status="failed", finished=time.time(),
                            error=str(exc)))
             return
+        _write_log(job_id, proc)
         if proc.returncode != 0:
             notify(_update(job_id, status="failed", finished=time.time(),
                            error=(proc.stderr.strip() or "generation failed")[-800:]))
@@ -223,12 +264,29 @@ def run(job_id):
         # What the backend said on a run that worked. Only failures ever read
         # stderr, so mflux's own "--steps is ignored" reached nobody: a caller
         # asking for something the model discards was told by the backend and
-        # the message was deleted one layer up.
-        warned = [ln.split("warning: ", 1)[1] for ln in proc.stderr.splitlines()
-                  if ln.strip().startswith("warning: ")]
+        # the message was deleted one layer up. The generator relays the
+        # backend's output in a job, so a raw "warning: " line can repeat one
+        # it printed itself: keep the first of each.
+        warned = []
+        for ln in proc.stderr.splitlines():
+            if ln.strip().startswith("warning: "):
+                text = ln.split("warning: ", 1)[1]
+                if text not in warned:
+                    warned.append(text)
         notify(_update(job_id, status="done", finished=time.time(),
                        output=lines[-1],
                        **({"warnings": warned} if warned else {})))
+
+
+def _write_log(job_id, proc):
+    """Keep what the generator printed. It used to be captured and dropped, so
+    every job log was 0 bytes and a failed render could not be looked into."""
+    try:
+        with open(log_path(job_id), "w", encoding="utf-8", errors="replace") as fh:
+            fh.write(proc.stderr or "")
+            fh.write(proc.stdout or "")
+    except OSError:
+        pass
 
 
 def _as(text):

@@ -1,0 +1,5 @@
+i  mflux-community/z-image-turbo-mflux-q8 is a smaller download of this model; the cached upstream weights are used.
+INFO: Weights: Tongyi-MAI/Z-Image-Turbo (upstream already cached)
+  0%|          | 0/2 [00:00<?, ?it/s] 50%|#####     | 1/2 [00:19<00:19, 19.49s/it]100%|##########| 2/2 [00:23<00:00, 10.37s/it]100%|##########| 2/2 [00:23<00:00, 11.74s/it]
+INFO: Image saved successfully at: /store/media/cap-image.png
+INFO: Metadata embedded successfully at: /store/media/cap-image.png
