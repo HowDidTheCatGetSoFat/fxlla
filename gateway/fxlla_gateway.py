@@ -1388,6 +1388,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.rstrip("/") in ("/health", "/v1/health"):
             self._json(200, {"status": "ok", "resident": MANAGER.status(),
                              "budget_mb": BUDGET_MB})
+        elif self.path.rstrip("/") in ("/monitor", "/v1/monitor"):
+            self._json(200, monitor_snapshot(self.server.server_address[1]))
         else:
             self._json(404, {"error": {"message": "not found: %s" % self.path}})
 
@@ -1771,6 +1773,54 @@ def _keep_warm_s():
 
 
 KEEP_WARM_S = _keep_warm_s()
+
+
+def _git_version():
+    try:
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        out = subprocess.run(["git", "-C", repo, "describe", "--always", "--dirty"],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode != 0:
+            return "unknown"
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+BOOT_TS = int(time.time())
+VERSION = _git_version()
+MACHINE = telemetry.MachineSampler(MODELS_DIR)
+
+
+def monitor_snapshot(port=None):
+    """Everything /monitor serves. Manager fields are read under its lock
+    (status() takes the lock itself, so it is called first); the machine
+    sample runs outside it because it shells out."""
+    backends = MANAGER.status()
+    with MANAGER.lock:
+        resident_mb = MANAGER._resident_mb()
+        waiting = MANAGER.waiting
+        started = MANAGER.oldest_wait_started
+        oldest = int(time.monotonic() - started) if started is not None else None
+    snap = TELEMETRY.snapshot()
+    machine = MACHINE.sample()
+    return {
+        "schema_version": 1,
+        "instance": {"pid": os.getpid(), "host": HOST, "port": port or PORT,
+                     "boot_ts": BOOT_TS, "budget_mb": BUDGET_MB,
+                     "keep_warm_min": KEEP_WARM_S // 60, "version": VERSION},
+        "backends": backends,
+        "resident_mb": resident_mb,
+        "work": {"waiting": waiting, "oldest_wait_s": oldest,
+                 "client_gone_total": snap["totals"].get("client_gone", 0)},
+        "totals": snap["totals"],
+        "series": snap["series"],
+        "ttft_p95_ms": snap["ttft_p95_ms"],
+        "day": snap["day"],
+        "recent": snap["recent"],
+        "events": snap["events"],
+        "machine": machine,
+    }
 
 # Checked often enough that "10 minutes" is not really 15, cheap enough to
 # ignore: it walks a dict of at most a handful of entries.

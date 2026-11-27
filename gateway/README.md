@@ -35,6 +35,59 @@ same time-series `fxlla stats` and the menu bar app read), shaped as
 best-effort: any failure is logged and swallowed so it never affects the
 proxied response. Embeddings and non-generative endpoints are not timed.
 
+## Telemetry and /monitor
+
+`GET /monitor` (also `/v1/monitor`) returns one JSON object with everything the
+gateway knows about itself. `/health` is unchanged. The top-level keys are
+`schema_version` (1), `instance`, `backends`, `resident_mb`, `work`, `totals`,
+`series`, `ttft_p95_ms`, `day`, `recent`, `events` and `machine`.
+
+Each finished completion request is also appended to `stats.jsonl`. The
+fields are only ever added to, so older readers keep working. A field the
+engine did not report is `null`; nothing is invented. The one estimate is the
+delta count used for `output_tokens`, flagged by `output_estimated: true`.
+
+- `id`: short id, unique per gateway run.
+- `ts`, `model`, `engine`, `ram_mb`, `ttft_ms`, `tps`, `source`: as before.
+- `prompt_tokens`: prompt size, cached tokens included.
+- `cached_tokens`: prompt tokens served from the engine's prompt cache.
+- `output_tokens`: tokens generated.
+- `output_estimated`: true when `output_tokens` is a delta count, not the
+  engine's number.
+- `prompt_ms`: time the engine spent reading the prompt (engine timings only).
+- `decode_ms`: time the engine spent generating (engine timings only).
+- `duration_ms`: wall time from dispatch to the last byte.
+- `finish`: `stop`, `length`, `tool_calls`, `client_gone` or `error`.
+- `stream`: whether the client asked for a stream.
+- `client_addr`: the client's remote address.
+- `client_app`: tag from the User-Agent (`opencode`, `hermes`, `curl`,
+  `python` or `other`).
+
+`work.oldest_wait_s` is the number of seconds since the load queue last became
+non-empty. It is not the age of the oldest blocked request. `work.waiting` is
+the number of requests blocked on a model load, and `work.client_gone_total`
+counts clients that disconnected mid-answer since boot.
+
+Usage injection: to read exact token counts, the gateway adds
+`stream_options.include_usage` to a streamed request when the client did not
+ask for it, and removes the resulting usage-only chunk before the client sees
+it. A client that asked for usage gets its stream untouched. Injection is
+limited to the engines `mlx`, `gguf` and `omlx`, whose servers honor the
+option. `mtplx` is excluded: it reports usage on its own terms and must not be
+sent options it may reject.
+
+`machine` holds unified memory, swap, memory pressure, GPU utilization and
+in-use memory, and free disk space, read without sudo and cached for about a
+second. All commands share a 2 second budget per sample; a command that is
+missing (on Linux) or hangs leaves its fields `null` and `/monitor` still
+answers.
+
+`/monitor` has no authentication. On a loopback bind that is harmless; on a
+LAN bind (`FXLLA_HOST=0.0.0.0`) anyone who can reach the port can read it. It
+exposes model names, token counts, timings, and client addresses and app tags.
+It never contains prompt or answer text, request headers other than the
+User-Agent tag, or keys.
+
 ## Notes and limits (v0)
 
 - Token counts from streamed deltas are approximate unless the server emits a

@@ -309,6 +309,64 @@ class TestGatewayE2E(unittest.TestCase):
         self.assertIn("fake", info["unloaded"])
         self.assertEqual(gw.MANAGER.status(), [])
 
+    def _monitor(self):
+        url = "http://127.0.0.1:%d/monitor" % self.gport
+        with urllib.request.urlopen(url, timeout=10) as r:
+            return r.status, r.read()
+
+    def test_monitor_has_every_section(self):
+        with urllib.request.urlopen(self._post(), timeout=10) as r:
+            r.read()
+        row = self._last_row()
+        status, raw = self._monitor()
+        self.assertEqual(status, 200)
+        m = json.loads(raw)
+        self.assertEqual(set(m), {
+            "schema_version", "instance", "backends", "resident_mb", "work",
+            "totals", "series", "ttft_p95_ms", "day", "recent", "events",
+            "machine"})
+        self.assertEqual(m["schema_version"], 1)
+        self.assertEqual(m["instance"]["port"], self.gport)
+        self.assertEqual(set(m["instance"]), {
+            "pid", "host", "port", "boot_ts", "budget_mb", "keep_warm_min",
+            "version"})
+        self.assertEqual(set(m["work"]), {
+            "waiting", "oldest_wait_s", "client_gone_total"})
+        self.assertEqual(m["recent"][0]["id"], row["id"])
+        self.assertEqual(m["resident_mb"], 10)
+
+    def test_v1_monitor_is_the_same_route(self):
+        url = "http://127.0.0.1:%d/v1/monitor" % self.gport
+        with urllib.request.urlopen(url, timeout=10) as r:
+            self.assertEqual(r.status, 200)
+
+    def test_health_shape_is_unchanged(self):
+        url = "http://127.0.0.1:%d/health" % self.gport
+        with urllib.request.urlopen(url, timeout=10) as r:
+            h = json.loads(r.read())
+        self.assertEqual(set(h), {"status", "resident", "budget_mb"})
+
+    def test_monitor_answers_when_machine_commands_fail(self):
+        def boom(*a, **k):
+            raise FileNotFoundError("nope")
+        real = gw.MACHINE
+        gw.MACHINE = gw.telemetry.MachineSampler(_STORE, run=boom)
+        try:
+            status, raw = self._monitor()
+        finally:
+            gw.MACHINE = real
+        self.assertEqual(status, 200)
+        self.assertIsNone(json.loads(raw)["machine"]["gpu_util_pct"])
+
+    def test_monitor_needs_no_auth_and_never_contains_text(self):
+        req = self._post(messages=[
+            {"role": "user", "content": "SECRET-PROMPT-TEXT"}])
+        with urllib.request.urlopen(req, timeout=10) as r:
+            r.read()
+        self._last_row()
+        _, raw = self._monitor()
+        self.assertNotIn(b"SECRET-PROMPT-TEXT", raw)
+
 
 if __name__ == "__main__":
     unittest.main()

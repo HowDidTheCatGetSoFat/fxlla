@@ -1,6 +1,7 @@
 import importlib
 import os
 import subprocess
+import time
 import sys
 import tempfile
 import threading
@@ -134,6 +135,17 @@ class TestMachine(unittest.TestCase):
         def hang(*a, **k):
             raise subprocess.TimeoutExpired(a[0], k.get("timeout"))
         self.assertIsNone(MachineSampler(tempfile.gettempdir(), run=hang).sample()["pressure"])
+
+    def test_one_sample_is_bounded_by_a_shared_deadline(self):
+        def slow(cmd, **k):
+            time.sleep(k["timeout"])
+            raise subprocess.TimeoutExpired(cmd, k["timeout"])
+        t0 = time.monotonic()
+        s = MachineSampler(tempfile.gettempdir(), run=slow).sample()
+        self.assertLess(time.monotonic() - t0, 3)
+        self.assertIsNone(s["pressure"])
+        self.assertIsNone(s["swap_used_bytes"])
+        self.assertIsNotNone(s["disk_free_bytes"])
 
     def test_sample_is_cached_for_ttl(self):
         calls = []

@@ -143,8 +143,11 @@ _PRESSURE = {1: "normal", 2: "warn", 4: "critical"}
 
 
 class MachineSampler:
-    """RAM, swap, pressure, GPU and disk without sudo. Each command has a
-    2 second budget; a missing or slow command leaves its fields None."""
+    """RAM, swap, pressure, GPU and disk without sudo. One sample shares a
+    2 second budget across all its commands; a missing or slow command, or one
+    that starts after the budget is spent, leaves its fields None."""
+
+    BUDGET_S = 2.0
 
     def __init__(self, store_dir, ttl_s=1.0, run=subprocess.run):
         self._dir = store_dir
@@ -153,10 +156,14 @@ class MachineSampler:
         self._lock = threading.Lock()
         self._at = None
         self._val = None
+        self._deadline = 0.0
 
     def _cmd(self, *argv):
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            return None
         try:
-            r = self._run(list(argv), capture_output=True, text=True, timeout=2)
+            r = self._run(list(argv), capture_output=True, text=True, timeout=left)
             if r.returncode != 0:
                 return None
             return r.stdout
@@ -164,6 +171,7 @@ class MachineSampler:
             return None
 
     def _collect(self):
+        self._deadline = time.monotonic() + self.BUDGET_S
         s = {"ram_total_bytes": None, "ram_used_bytes": None,
              "swap_used_bytes": None, "swap_total_bytes": None, "pressure": None,
              "gpu_util_pct": None, "gpu_inuse_bytes": None,
