@@ -342,7 +342,18 @@ WARNING_MARK = "fxlla-warning: "
 
 
 def _stop(proc):
-    """Kill the generator and wait for it. Never raises."""
+    """Stop the generator and wait for it. Never raises. SIGTERM first: the
+    generator turns it into an exit that also kills its backend child, which a
+    plain SIGKILL would orphan. SIGKILL only if it does not leave in time."""
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=10)
+        return
+    except Exception:
+        pass
     try:
         proc.kill()
     except OSError:

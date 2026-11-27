@@ -3428,6 +3428,59 @@ class TestJobWorkerOutput(unittest.TestCase):
         self.assertNotIn("could not start", rec["error"])
         self.assertIn("No space left", rec["error"])
 
+    def test_a_failing_log_pump_also_stops_the_backend_child(self):
+        mdir = os.path.dirname(os.path.abspath(media.__file__))
+        pidfile = os.path.join(self.tmp, "bchild.pid")
+        self._gen(
+            "import argparse, os, sys\n"
+            "sys.path.insert(0, %r)\n"
+            "import generate as g\n"
+            "def fn(args):\n"
+            "    g.run_backend([sys.executable, '-c', "
+            "'import os,time; open(os.environ[\"PIDFILE\"], \"w\")"
+            ".write(str(os.getpid())); time.sleep(60)'])\n"
+            "args = argparse.Namespace(cmd='image', prompt='p', model=None, "
+            "steps=None, width=None, height=None, text=None, image=None)\n"
+            "g.run_tracked(args, fn)\n" % mdir)
+        os.environ["PIDFILE"] = pidfile
+        self.addCleanup(os.environ.pop, "PIDFILE", None)
+        job_id = self._queued()
+        child = []
+
+        def reap():
+            if child:
+                try:
+                    os.kill(child[0], signal.SIGKILL)
+                except OSError:
+                    pass
+        self.addCleanup(reap)
+
+        def boom(stream, log):
+            deadline = time.time() + 20
+            while time.time() < deadline and not child:
+                try:
+                    with open(pidfile) as fh:
+                        child.append(int(fh.read()))
+                except (OSError, ValueError):
+                    time.sleep(0.05)
+            raise OSError(28, "No space left on device")
+        saved = jobs._pump_stdout
+        jobs._pump_stdout = boom
+        self.addCleanup(setattr, jobs, "_pump_stdout", saved)
+        jobs.run(job_id)
+        self.assertTrue(child, "the backend child never started")
+
+        def gone(pid):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+        end = time.time() + 5
+        while time.time() < end and not gone(child[0]):
+            time.sleep(0.1)
+        self.assertTrue(gone(child[0]), "the backend child outlived the job")
+
     def test_a_lowercase_backend_warning_line_is_not_a_job_warning(self):
         # In job mode the backend's raw output is relayed into the stream
         # jobs.run reads; only the generator's own marked lines count.

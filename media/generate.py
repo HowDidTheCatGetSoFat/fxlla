@@ -1071,7 +1071,7 @@ def run_tracked(args, fn):
     except Exception:
         tracker = None
     _TRACKER = tracker
-    restore = _install_term_handler() if tracker and tracker.own else None
+    restore = _install_term_handler() if tracker else None
     try:
         result = fn(args)
     except BaseException as exc:
@@ -1090,8 +1090,8 @@ def run_tracked(args, fn):
 
 
 def _install_term_handler():
-    """In a tracked synchronous run, turn SIGTERM (what `fxlla media cancel`
-    sends) into an exit, so run_backend's except path kills the backend child
+    """In a tracked run (sync or job), turn SIGTERM (what `fxlla media cancel`
+    and the job worker send) into an exit, so run_backend's except path kills the backend child
     instead of orphaning it. Main thread only; returns the undo, or None."""
     if threading.current_thread() is not threading.main_thread():
         return None
