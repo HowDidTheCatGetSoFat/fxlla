@@ -1577,7 +1577,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             while True:
                 try:
-                    chunk = resp.read(1024)
+                    chunk = resp.read1(1024)
                 except Exception:
                     finish = "error"   # the upstream died mid-reply
                     break

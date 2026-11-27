@@ -258,6 +258,29 @@ class TestGatewayE2E(unittest.TestCase):
         self.assertIn(b"[DONE]", out)
         self.assertNotIn(b'"usage"', out)
 
+    def test_first_token_reaches_the_client_without_waiting_for_a_full_read(self):
+        import socket
+        _Backend.mode = "paced"
+        payload = json.dumps({"model": "fake", "stream": True, "messages": [
+            {"role": "user", "content": "hi"}]}).encode()
+        sock = socket.create_connection(("127.0.0.1", self.gport), timeout=10)
+        t0 = time.monotonic()
+        sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+                     b"Content-Type: application/json\r\nContent-Length: %d\r\n"
+                     b"Connection: close\r\n\r\n%s" % (len(payload), payload))
+        got = b""
+        first = None
+        while first is None:
+            data = sock.recv(4096)
+            if not data:
+                break
+            got += data
+            if b"tok0" in got:
+                first = time.monotonic() - t0
+        sock.close()
+        self.assertIsNotNone(first)
+        self.assertLess(first, 0.25)
+
     def test_mtplx_is_never_injected(self):
         self._register("mtplx")
         with urllib.request.urlopen(self._post(), timeout=10) as r:
