@@ -1,0 +1,1 @@
+{"system":{"os":"posix","ram_total":34359738368,"ram_free":8589934592,"comfyui_version":"0.3.40","python_version":"3.12.4","pytorch_version":"2.5.1","embedded_python":false,"argv":["main.py"]},"devices":[{"name":"mps","type":"mps","index":0,"vram_total":34359738368,"vram_free":8589934592,"torch_vram_total":34359738368,"torch_vram_free":8589934592}]}

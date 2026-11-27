@@ -1,0 +1,4 @@
+{"models":[
+{"name":"qwen3:8b","model":"qwen3:8b","modified_at":"2026-11-01T10:00:00Z","size":5234567890,"details":{"parent_model":"","format":"gguf","family":"qwen3","families":["qwen3"],"parameter_size":"8.2B","quantization_level":"Q4_K_M","context_length":40960,"embedding_length":4096,"runner":"ollama"},"capabilities":["completion","tools"]},
+{"name":"nomic-embed-text:latest","model":"nomic-embed-text:latest","modified_at":"2026-10-12T09:30:00Z","size":274302450,"details":{"parent_model":"","format":"gguf","family":"nomic-bert","families":["nomic-bert"],"parameter_size":"137M","quantization_level":"F16","context_length":2048,"embedding_length":768,"runner":"ollama"},"capabilities":["embedding"]}
+]}
