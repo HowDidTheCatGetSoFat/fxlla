@@ -280,5 +280,58 @@ class TestUnmeasurableRate(unittest.TestCase):
         self.assertIsNone(tps)
         self.assertEqual(tokens, 120)
 
+
+class TestEngineReport(unittest.TestCase):
+    def test_llama_server_stream(self):
+        r = metrics.engine_report(
+            {"completion_tokens": 200, "prompt_tokens": 12, "total_tokens": 212,
+             "prompt_tokens_details": {"cached_tokens": 0}},
+            {"cache_n": 0, "prompt_n": 12, "prompt_ms": 45.795,
+             "predicted_n": 200, "predicted_ms": 1860.769})
+        self.assertEqual((r["prompt_tokens"], r["cached_tokens"], r["output_tokens"]), (12, 0, 200))
+        self.assertEqual((r["prompt_ms"], r["decode_ms"]), (46, 1861))
+
+    def test_llama_server_cache_counts_from_timings(self):
+        r = metrics.engine_report(
+            {"completion_tokens": 161, "prompt_tokens": 12,
+             "prompt_tokens_details": {"cached_tokens": 8}},
+            {"cache_n": 8, "prompt_n": 4, "prompt_ms": 16.361,
+             "predicted_n": 161, "predicted_ms": 1482.787})
+        self.assertEqual((r["prompt_tokens"], r["cached_tokens"]), (12, 8))
+
+    def test_mlx_has_tokens_but_no_engine_timings(self):
+        r = metrics.engine_report(
+            {"prompt_tokens": 31, "completion_tokens": 2, "total_tokens": 33,
+             "prompt_tokens_details": {"cached_tokens": 30}}, None)
+        self.assertEqual((r["prompt_tokens"], r["cached_tokens"], r["output_tokens"]), (31, 30, 2))
+        self.assertIsNone(r["prompt_ms"])
+        self.assertIsNone(r["decode_ms"])
+
+    def test_omlx_timings_live_inside_usage_in_seconds(self):
+        r = metrics.engine_report(
+            {"prompt_tokens": 22, "completion_tokens": 300,
+             "prompt_tokens_details": {"cached_tokens": 0},
+             "completion_tokens_details": {"reasoning_tokens": 300},
+             "prompt_eval_duration": 4.05, "generation_duration": 7.03}, None)
+        self.assertEqual((r["prompt_ms"], r["decode_ms"], r["reasoning_tokens"]), (4050, 7030, 300))
+
+    def test_mtplx_reports_draft_acceptance(self):
+        r = metrics.engine_report(
+            {"prompt_tokens": 22, "completion_tokens": 108,
+             "completion_tokens_details": {"reasoning_tokens": 24}},
+            {"prompt_n": 22, "predicted_n": 108, "prompt_ms": 631.235,
+             "predicted_ms": 2664.547, "draft_n": 84, "draft_n_accepted": 79})
+        self.assertEqual((r["draft_tokens"], r["draft_accepted"]), (84, 79))
+        self.assertEqual((r["prompt_ms"], r["decode_ms"]), (631, 2665))
+
+    def test_nothing_reported_is_all_none(self):
+        self.assertTrue(all(v is None for v in metrics.engine_report(None, None).values()))
+
+    def test_garbage_types_are_none_not_an_exception(self):
+        r = metrics.engine_report({"prompt_tokens": "12", "completion_tokens": None}, {"prompt_ms": "x"})
+        self.assertIsNone(r["prompt_tokens"])
+        self.assertIsNone(r["prompt_ms"])
+
+
 if __name__ == "__main__":
     unittest.main()

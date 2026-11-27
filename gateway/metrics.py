@@ -96,6 +96,61 @@ def _usage_completion_tokens(obj):
     return None
 
 
+def _int(v):
+    # bool is an int subclass; a flag is not a count.
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _ms(v):
+    v = _num(v)
+    return None if v is None else int(round(v))
+
+
+def _secs_ms(v):
+    v = _num(v)
+    return None if v is None else _ms(v * 1000)
+
+
+def _sub(d, key):
+    d = d.get(key) if isinstance(d, dict) else None
+    return d if isinstance(d, dict) else {}
+
+
+def engine_report(usage, timings):
+    """Normalize what an engine says about a request into fixed fields.
+
+    Engines disagree on where they report: llama-server puts timings in a
+    `timings` object (ms), omlx puts durations inside `usage` (seconds), mlx
+    reports tokens only. A value the engine did not give stays None; nothing
+    is estimated here.
+    """
+    usage = usage if isinstance(usage, dict) else {}
+    timings = timings if isinstance(timings, dict) else {}
+    cached = _int(_sub(usage, "prompt_tokens_details").get("cached_tokens"))
+    if cached is None:
+        cached = _int(timings.get("cache_n"))
+    prompt_ms = _ms(timings.get("prompt_ms"))
+    if prompt_ms is None:
+        prompt_ms = _secs_ms(usage.get("prompt_eval_duration"))
+    decode_ms = _ms(timings.get("predicted_ms"))
+    if decode_ms is None:
+        decode_ms = _secs_ms(usage.get("generation_duration"))
+    return {
+        "prompt_tokens": _int(usage.get("prompt_tokens")),
+        "cached_tokens": cached,
+        "output_tokens": _int(usage.get("completion_tokens")),
+        "reasoning_tokens": _int(_sub(usage, "completion_tokens_details").get("reasoning_tokens")),
+        "prompt_ms": prompt_ms,
+        "decode_ms": decode_ms,
+        "draft_tokens": _int(timings.get("draft_n")),
+        "draft_accepted": _int(timings.get("draft_n_accepted")),
+    }
+
+
 # Above this, the number is describing the transport rather than the model:
 # nothing decoding locally on Apple Silicon approaches it, so a rate past it
 # means the stream arrived in one piece and the timestamps collapsed.
