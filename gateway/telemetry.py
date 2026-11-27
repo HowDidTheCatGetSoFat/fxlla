@@ -2,9 +2,11 @@
 events, rate series and day aggregates. One lock guards all state."""
 import collections
 import math
+import os
+import re
+import subprocess
 import threading
 import time
-import uuid
 
 _SERIES = ("answer_tps", "prompt_tps", "ttft_ms")
 _SERIES_MAX = 2000
@@ -39,9 +41,12 @@ class Telemetry:
         self._totals = {"requests": 0, "prompt_tokens": 0, "cached_tokens": 0,
                         "output_tokens": 0, "errors": 0, "client_gone": 0}
         self._day = {"date": None, "cache_saved_tokens": 0, "clients": {}}
+        self._next_id = 0
 
     def new_id(self):
-        return uuid.uuid4().hex[:8]
+        with self._lock:
+            self._next_id = (self._next_id + 1) & 0xFFFFFFFF
+            return "%08x" % self._next_id
 
     def _prune(self, now):
         cutoff = now - self._window_s
@@ -105,3 +110,97 @@ class Telemetry:
                         "cache_saved_tokens": self._day["cache_saved_tokens"],
                         "clients": dict(self._day["clients"])},
             }
+
+
+def _int(pattern, text):
+    m = re.search(pattern, text)
+    return int(m.group(1)) if m else None
+
+
+def parse_ioreg(text):
+    return {"gpu_util_pct": _int(r'"Device Utilization %"\s*=\s*(\d+)', text),
+            "gpu_inuse_bytes": _int(r'"In use system memory"\s*=\s*(\d+)', text)}
+
+
+def parse_vm_stat(text, page_size, total_bytes):
+    pages = {}
+    for name in ("free", "inactive", "speculative"):
+        pages[name] = _int(r"Pages %s:\s+(\d+)" % name, text)
+    if any(v is None for v in pages.values()):
+        return {"ram_used_bytes": None}
+    return {"ram_used_bytes": total_bytes - sum(pages.values()) * page_size}
+
+
+def parse_swapusage(text):
+    out = {}
+    for key, name in (("total", "swap_total_bytes"), ("used", "swap_used_bytes")):
+        m = re.search(r"\b%s = ([\d.]+)([KMGT])" % key, text)
+        out[name] = int(float(m.group(1)) * 1024 ** ("KMGT".index(m.group(2)) + 1)) if m else None
+    return out
+
+
+_PRESSURE = {1: "normal", 2: "warn", 4: "critical"}
+
+
+class MachineSampler:
+    """RAM, swap, pressure, GPU and disk without sudo. Each command has a
+    2 second budget; a missing or slow command leaves its fields None."""
+
+    def __init__(self, store_dir, ttl_s=1.0, run=subprocess.run):
+        self._dir = store_dir
+        self._ttl = ttl_s
+        self._run = run
+        self._lock = threading.Lock()
+        self._at = None
+        self._val = None
+
+    def _cmd(self, *argv):
+        try:
+            r = self._run(list(argv), capture_output=True, text=True, timeout=2)
+            if r.returncode != 0:
+                return None
+            return r.stdout
+        except Exception:
+            return None
+
+    def _collect(self):
+        s = {"ram_total_bytes": None, "ram_used_bytes": None,
+             "swap_used_bytes": None, "swap_total_bytes": None, "pressure": None,
+             "gpu_util_pct": None, "gpu_inuse_bytes": None,
+             "disk_free_bytes": None, "disk_total_bytes": None}
+        out = self._cmd("ioreg", "-r", "-c", "IOAccelerator", "-d", "1", "-w0")
+        if out is not None:
+            s.update(parse_ioreg(out))
+        out = self._cmd("sysctl", "-n", "hw.memsize")
+        try:
+            s["ram_total_bytes"] = int(out.strip()) if out else None
+        except ValueError:
+            pass
+        out = self._cmd("vm_stat")
+        if out is not None and s["ram_total_bytes"]:
+            ps = _int(r"page size of (\d+) bytes", out)
+            if ps:
+                s.update(parse_vm_stat(out, ps, s["ram_total_bytes"]))
+        out = self._cmd("sysctl", "-n", "vm.swapusage")
+        if out is not None:
+            s.update(parse_swapusage(out))
+        out = self._cmd("sysctl", "-n", "kern.memorystatus_vm_pressure_level")
+        try:
+            s["pressure"] = _PRESSURE.get(int(out.strip())) if out else None
+        except ValueError:
+            pass
+        try:
+            st = os.statvfs(self._dir)
+            s["disk_free_bytes"] = st.f_bavail * st.f_frsize
+            s["disk_total_bytes"] = st.f_blocks * st.f_frsize
+        except OSError:
+            pass
+        return s
+
+    def sample(self):
+        with self._lock:
+            now = time.monotonic()
+            if self._val is None or now - self._at >= self._ttl:
+                self._val = self._collect()
+                self._at = time.monotonic()
+            return dict(self._val)

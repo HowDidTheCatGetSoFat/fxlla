@@ -1,6 +1,8 @@
 import importlib
 import os
+import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 
@@ -8,6 +10,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 telemetry = importlib.import_module("telemetry")
 Telemetry = telemetry.Telemetry
 client_tag = telemetry.client_tag
+parse_ioreg = telemetry.parse_ioreg
+parse_vm_stat = telemetry.parse_vm_stat
+parse_swapusage = telemetry.parse_swapusage
+MachineSampler = telemetry.MachineSampler
 
 
 class TestTelemetry(unittest.TestCase):
@@ -92,6 +98,67 @@ class TestTelemetry(unittest.TestCase):
         self.assertEqual(client_tag("curl/8.7.1"), "curl")
         self.assertEqual(client_tag("Python-urllib/3.15"), "python")
         self.assertEqual(client_tag(None), "other")
+
+IOREG = ('"PerformanceStatistics" = {"In use system memory (driver)"=0,"Alloc system memory"=86238248960,'
+         '"Tiler Utilization %"=6,"Renderer Utilization %"=11,"Device Utilization %"=13,"In use system memory"=2423013376}')
+
+
+class TestMachine(unittest.TestCase):
+    def test_new_id_distinct_over_70000(self):
+        t = Telemetry()
+        ids = {t.new_id() for _ in range(70000)}
+        self.assertEqual(len(ids), 70000)
+        self.assertTrue(all(len(i) == 8 for i in ids))
+
+    def test_parse_ioreg(self):
+        self.assertEqual(parse_ioreg(IOREG), {"gpu_util_pct": 13, "gpu_inuse_bytes": 2423013376})
+
+    def test_parse_swapusage(self):
+        r = parse_swapusage("total = 2048.00M  used = 869.00M  free = 1179.00M  (encrypted)")
+        self.assertEqual((r["swap_total_bytes"], r["swap_used_bytes"]), (2048 * 2**20, 869 * 2**20))
+
+    def test_parse_vm_stat(self):
+        text = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+                "Pages free:                               100.\nPages inactive:                           50.\n"
+                "Pages speculative:                        10.\n")
+        self.assertEqual(parse_vm_stat(text, 16384, total_bytes=1000 * 16384)["ram_used_bytes"], 840 * 16384)
+
+    def test_missing_commands_give_none_not_errors(self):
+        def boom(*a, **k):
+            raise FileNotFoundError("ioreg")
+        s = MachineSampler(tempfile.gettempdir(), run=boom).sample()
+        self.assertIsNone(s["gpu_util_pct"])
+        self.assertIsNotNone(s["disk_free_bytes"])
+
+    def test_a_hanging_command_is_cut_at_its_timeout(self):
+        def hang(*a, **k):
+            raise subprocess.TimeoutExpired(a[0], k.get("timeout"))
+        self.assertIsNone(MachineSampler(tempfile.gettempdir(), run=hang).sample()["pressure"])
+
+    def test_sample_is_cached_for_ttl(self):
+        calls = []
+
+        def run(*a, **k):
+            calls.append(a)
+            raise FileNotFoundError()
+        m = MachineSampler(tempfile.gettempdir(), ttl_s=60, run=run)
+        m.sample()
+        n = len(calls)
+        m.sample()
+        self.assertEqual(len(calls), n)
+
+    def test_fake_run_fills_fields_and_pressure(self):
+        def run(cmd, **k):
+            out = {"ioreg": IOREG, "vm_stat": "Pages free: 1.\nPages inactive: 1.\nPages speculative: 1.\n",
+                   "hw.memsize": "16384", "vm.swapusage": "total = 1.00M  used = 0.50M  free = 0.50M",
+                   "kern.memorystatus_vm_pressure_level": "2"}
+            key = cmd[0] if cmd[0] in out else cmd[-1]
+            return subprocess.CompletedProcess(cmd, 0, stdout=out[key], stderr="")
+        s = MachineSampler(tempfile.gettempdir(), run=run).sample()
+        self.assertEqual(s["pressure"], "warn")
+        self.assertEqual(s["gpu_util_pct"], 13)
+        self.assertEqual(s["ram_total_bytes"], 16384)
+        self.assertEqual(s["swap_total_bytes"], 2**20)
 
 
 if __name__ == "__main__":
