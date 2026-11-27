@@ -1466,6 +1466,8 @@ class TestLiveState(unittest.TestCase):
         events = self.tel.snapshot()["events"]
         self.assertEqual([e["kind"] for e in events], ["load_failed", "load_started"])
         self.assertIn("exited with code 127", events[0]["reason"])
+        self.assertNotIn("/", events[0]["reason"])
+        self.assertNotIn("mlx_lm.server", events[0]["reason"])
 
     def test_dead_backend_emits_exited_with_its_code(self):
         m = self._manager_with(_ExitedProc())

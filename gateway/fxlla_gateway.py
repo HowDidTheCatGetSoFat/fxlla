@@ -1164,13 +1164,14 @@ class Manager:
                 raise RuntimeError("model '%s' was unloaded during load" % alias)
             why = ("exited with code %d" % code if code is not None
                    else "did not answer within the load timeout")
+            generic = why   # the telemetry event carries no log line or path
             last = last_log_line(log_path)
             if last:
                 why += ": " + last
             if log_path:
                 why += " (log: %s)" % log_path
             log("failed to load %s: %s" % (alias, why))
-            TELEMETRY.event("load_failed", alias, reason=why)
+            TELEMETRY.event("load_failed", alias, reason=generic)
             raise RuntimeError("backend for %s did not become ready: %s" % (alias, why))
         TELEMETRY.event("loaded", alias, seconds=round(time.monotonic() - load_t0, 1),
                         size_mb=size_mb)

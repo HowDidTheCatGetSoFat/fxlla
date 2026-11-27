@@ -410,6 +410,17 @@ class TestGatewayE2E(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIsNone(json.loads(raw)["machine"]["gpu_util_pct"])
 
+    def test_monitor_never_contains_request_headers(self):
+        req = self._post()
+        req.add_header("Authorization", "Bearer SECRET-AUTH-VALUE")
+        req.add_header("X-Custom", "SECRET-HEADER-VALUE")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            r.read()
+        self._last_row()
+        _, raw = self._monitor()
+        self.assertNotIn(b"SECRET-AUTH-VALUE", raw)
+        self.assertNotIn(b"SECRET-HEADER-VALUE", raw)
+
     def test_monitor_needs_no_auth_and_never_contains_text(self):
         req = self._post(messages=[
             {"role": "user", "content": "SECRET-PROMPT-TEXT"}])
