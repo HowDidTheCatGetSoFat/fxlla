@@ -5,8 +5,10 @@ import os
 import socket
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -905,8 +907,7 @@ class TestInFlightIsVisible(unittest.TestCase):
     def test_status_says_what_is_being_worked_on(self):
         mgr = self._mgr()
         alias = "probe-model"
-        backend = type("B", (), {})()
-        backend.alias, backend.port, backend.size_mb = alias, 9999, 100
+        backend = gw.Backend(alias, 9999, None, 100, "f", "mlx")
         backend.last_used = time.monotonic()
         backend.inflight, backend.started, backend.prompt_tokens = 0, 0.0, None
         with mgr.lock:
@@ -943,8 +944,7 @@ class TestInFlightIsVisible(unittest.TestCase):
         """A new turn must not inherit the last turn's token count."""
         mgr = self._mgr()
         alias = "probe-model-3"
-        backend = type("B", (), {})()
-        backend.alias, backend.port, backend.size_mb = alias, 9997, 100
+        backend = gw.Backend(alias, 9997, None, 100, "f", "mlx")
         backend.last_used = time.monotonic()
         backend.inflight, backend.started, backend.prompt_tokens = 0, 0.0, None
         backend.produced = 0
@@ -963,8 +963,7 @@ class TestInFlightIsVisible(unittest.TestCase):
         """Zero tokens is a claim; no answer is not."""
         mgr = self._mgr()
         alias = "probe-model-2"
-        backend = type("B", (), {})()
-        backend.alias, backend.port, backend.size_mb = alias, 9998, 100
+        backend = gw.Backend(alias, 9998, None, 100, "f", "mlx")
         backend.last_used = time.monotonic()
         backend.inflight, backend.started, backend.prompt_tokens = 0, 0.0, None
         backend.produced = 0
@@ -1440,6 +1439,124 @@ class TestVisionForModelsThatCannotSee(unittest.TestCase):
             {"type": "image_url", "image_url": {"url": "n%d" % i}}
             for i in range(gw.MAX_IMAGES)]
         self.assertEqual(gw.add_vision(body, "coder"), "seer")
+
+
+class TestLiveState(unittest.TestCase):
+    """Live per-request state, a load queue count and structured events."""
+
+    def setUp(self):
+        TestBackendStartFailure.setUp(self)
+        tel = gw.telemetry.Telemetry()
+        patcher = unittest.mock.patch.object(gw, "TELEMETRY", tel)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.tel = tel
+
+    def _kinds(self):
+        return [e["kind"] for e in self.tel.snapshot()["events"]]
+
+    def _manager_with(self, proc, engine="mlx", alias="mlx-model"):
+        m = gw.Manager()
+        m.backends[alias] = gw.Backend(alias, 1, proc, 7, "field", engine)
+        return m
+
+    def test_load_failure_emits_load_started_then_load_failed(self):
+        with self.assertRaises(RuntimeError):
+            gw.Manager().ensure("mlx-model")
+        events = self.tel.snapshot()["events"]
+        self.assertEqual([e["kind"] for e in events], ["load_failed", "load_started"])
+        self.assertIn("exited with code 127", events[0]["reason"])
+
+    def test_dead_backend_emits_exited_with_its_code(self):
+        m = self._manager_with(_ExitedProc())
+        with self.assertRaises(RuntimeError):
+            m.ensure("mlx-model")
+        exited = [e for e in self.tel.snapshot()["events"] if e["kind"] == "exited"]
+        self.assertEqual(len(exited), 1)
+        self.assertEqual(exited[0]["code"], -9)
+
+    def test_reap_idle_emits_idle_unloaded(self):
+        m = self._manager_with(_FakeProc())
+        m.backends["mlx-model"].last_used -= 100
+        self.assertEqual(m.reap_idle(10), ["mlx-model"])
+        self.assertEqual(self._kinds(), ["idle_unloaded"])
+
+    def test_unload_all_emits_admin_unloaded(self):
+        m = self._manager_with(_FakeProc())
+        m.backends["two"] = gw.Backend("two", 2, _FakeProc(), 7, "f", "mlx")
+        m.unload_all()
+        events = self.tel.snapshot()["events"]
+        self.assertEqual(sorted(e["alias"] for e in events), ["mlx-model", "two"])
+        self.assertEqual({e["kind"] for e in events}, {"admin_unloaded"})
+
+    def test_status_shows_client_and_max_tokens_while_in_flight(self):
+        m = self._manager_with(_FakeProc())
+        m.begin("mlx-model", 10, client_addr="10.0.0.5", client_app="opencode",
+                max_tokens=4096)
+        item = m.status()[0]
+        self.assertEqual(item["inflight"], 1)
+        self.assertEqual(item["client_addr"], "10.0.0.5")
+        self.assertEqual(item["client_app"], "opencode")
+        self.assertEqual(item["max_tokens"], 4096)
+
+    def _tps(self, engine):
+        m = self._manager_with(_FakeProc(), engine=engine)
+        clock = [100.0]
+        with unittest.mock.patch.object(gw.time, "monotonic", lambda: clock[0]):
+            m.begin("mlx-model", 10)
+            for i in range(21):
+                clock[0] = 100.0 + i * 0.05
+                m.progress("mlx-model", i)
+            return m.status()[0]["live_tps"]
+
+    def test_live_tps_from_progress_and_none_for_omlx(self):
+        self.assertEqual(self._tps("mlx"), 20.0)
+        self.assertIsNone(self._tps("omlx"))
+
+    def test_live_tps_is_none_with_a_single_point(self):
+        m = self._manager_with(_FakeProc())
+        m.begin("mlx-model", 10)
+        m.progress("mlx-model", 1)
+        self.assertIsNone(m.status()[0]["live_tps"])
+
+    def test_keep_warm_left_counts_down(self):
+        m = self._manager_with(_FakeProc())
+        m.backends["mlx-model"].last_used = time.monotonic() - 600
+        with unittest.mock.patch.object(gw, "KEEP_WARM_S", 3600):
+            left = m.status()[0]["keep_warm_left_s"]
+        self.assertTrue(2990 <= left <= 3000, left)
+        with unittest.mock.patch.object(gw, "KEEP_WARM_S", 0):
+            self.assertIsNone(m.status()[0]["keep_warm_left_s"])
+
+    def test_waiting_counts_threads_blocked_on_a_load(self):
+        with open(gw.FXLLA_BIN, "w") as f:
+            f.write("#!/bin/sh\nexec sleep 30\n")
+        wait = gw.Manager._wait_ready
+        gw.Manager._wait_ready = (
+            lambda self, port, timeout=180, proc=None: wait(self, port, timeout=1.5, proc=proc))
+        self.addCleanup(setattr, gw.Manager, "_wait_ready", wait)
+        m = gw.Manager()
+        self.assertEqual(m.waiting, 0)
+        self.assertIsNone(m.oldest_wait_started)
+
+        def call():
+            try:
+                m.ensure("mlx-model")
+            except RuntimeError:
+                pass
+        threads = [threading.Thread(target=call) for _ in range(3)]
+        for t in threads:
+            t.start()
+        deadline = time.monotonic() + 1.0
+        while m.waiting < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        with m.lock:
+            self.assertEqual(m.waiting, 3)
+            self.assertIsNotNone(m.oldest_wait_started)
+        for t in threads:
+            t.join(10)
+        self.assertEqual(m.waiting, 0)
+        self.assertIsNone(m.oldest_wait_started)
 
 
 if __name__ == "__main__":

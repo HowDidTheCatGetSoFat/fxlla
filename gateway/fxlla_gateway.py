@@ -61,6 +61,7 @@ Config via environment:
                                 connection for as long as all of them take
 """
 
+import collections
 import hashlib
 import json
 import os
@@ -905,7 +906,7 @@ def downloaded_models():
 
 
 class Backend:
-    def __init__(self, alias, port, proc, size_mb, model_field, engine):
+    def __init__(self, alias, port, proc, size_mb, model_field, engine, context=None):
         self.alias = alias
         self.port = port
         self.proc = proc
@@ -926,6 +927,15 @@ class Backend:
         # Output tokens seen so far on the in-flight request, so /health can
         # say "generating, 1900 tokens" instead of leaving it as "reading".
         self.produced = 0
+        # Context window, read once at registration (it can touch a GGUF header).
+        self.context = context
+        # Who asked for the in-flight request, for the monitor.
+        self.client_addr = None
+        self.client_app = None
+        self.max_tokens = None
+        self.cached_tokens = None
+        # (monotonic, produced) per progress() call, for a live delta rate.
+        self.progress_pts = collections.deque(maxlen=64)
 
 
 def engine_for(alias):
@@ -971,6 +981,10 @@ class Manager:
         self.loading = {}           # alias -> (Event, port) for in-flight loads
         self.lock = threading.Lock()
         self.epoch = 0              # bumped by unload_all to cancel in-flight loads
+        # Threads inside ensure() blocked on a load (the loader counts too), and
+        # when the current queue started. Read under the lock.
+        self.waiting = 0
+        self.oldest_wait_started = None
 
     def _alloc_port(self):
         used = {b.port for b in self.backends.values()}
@@ -1018,6 +1032,7 @@ class Manager:
         except Exception:
             pass
         del self.backends[victim.alias]
+        TELEMETRY.event("evicted", victim.alias, size_mb=victim.size_mb)
 
     def ensure(self, alias):
         """Return (port, model_field) for alias, loading and evicting as needed.
@@ -1026,6 +1041,7 @@ class Manager:
         load runs outside the lock, so requests to already-loaded models never
         block behind another model's startup. Concurrent requests for the same
         not-yet-loaded model wait on a per-model Event instead of the lock."""
+        port = size_mb = load_epoch = None
         with self.lock:
             b = self.backends.get(alias)
             # A backend that exited on its own (a crash, an OOM kill, someone
@@ -1035,6 +1051,7 @@ class Manager:
             if b is not None and b.proc is not None and b.proc.poll() is not None:
                 log("%s exited on its own (code %s); reloading"
                     % (alias, b.proc.returncode))
+                TELEMETRY.event("exited", alias, code=b.proc.returncode)
                 del self.backends[alias]
                 b = None
             if b is not None:
@@ -1056,7 +1073,22 @@ class Manager:
                 self.loading[alias] = (ev, port)
                 loader = True
                 load_epoch = self.epoch
+            # Counted for the loader and every waiter alike; undone in the
+            # finally below, so a raise cannot leave the queue stuck.
+            if self.waiting == 0:
+                self.oldest_wait_started = time.monotonic()
+            self.waiting += 1
+        try:
+            return self._finish_ensure(alias, loader, ev, port, size_mb, load_epoch)
+        finally:
+            with self.lock:
+                self.waiting -= 1
+                if self.waiting <= 0:
+                    self.waiting = 0
+                    self.oldest_wait_started = None
 
+    def _finish_ensure(self, alias, loader, ev, port, size_mb, load_epoch):
+        """The slow half of ensure(), run outside the lock (see ensure)."""
         if not loader:
             # another thread is loading this model; wait for it, do not hold a lock
             ev.wait(timeout=200)
@@ -1073,6 +1105,8 @@ class Manager:
         stale = False
         model_field = None
         log_path = backend_log_path(alias)
+        load_t0 = time.monotonic()
+        TELEMETRY.event("load_started", alias, size_mb=size_mb)
         try:
             log("loading %s on :%d (%d MB)" % (alias, port, size_mb))
             # The backend's own output is the only place a failed start is
@@ -1098,6 +1132,13 @@ class Manager:
                     out.close()   # the child holds its own copy
             ready = self._wait_ready(port, proc=proc)
         finally:
+            # Read before the lock: a GGUF header read is not registry work.
+            ctx = None
+            if ready:
+                try:
+                    ctx = model_context(alias)
+                except Exception:
+                    ctx = None
             with self.lock:
                 self.loading.pop(alias, None)
                 # If unload_all ran while this model was loading, do not register
@@ -1107,7 +1148,7 @@ class Manager:
                     engine = engine_for(alias)
                     model_field = model_field_from(alias, engine)
                     self.backends[alias] = Backend(
-                        alias, port, proc, size_mb, model_field, engine)
+                        alias, port, proc, size_mb, model_field, engine, ctx)
                 ev.set()
         if not ready or stale:
             # Read before terminate(): a backend still loading at the timeout
@@ -1119,6 +1160,7 @@ class Manager:
                 except Exception:
                     pass
             if stale:
+                TELEMETRY.event("load_failed", alias, reason="unloaded during load")
                 raise RuntimeError("model '%s' was unloaded during load" % alias)
             why = ("exited with code %d" % code if code is not None
                    else "did not answer within the load timeout")
@@ -1128,7 +1170,10 @@ class Manager:
             if log_path:
                 why += " (log: %s)" % log_path
             log("failed to load %s: %s" % (alias, why))
+            TELEMETRY.event("load_failed", alias, reason=why)
             raise RuntimeError("backend for %s did not become ready: %s" % (alias, why))
+        TELEMETRY.event("loaded", alias, seconds=round(time.monotonic() - load_t0, 1),
+                        size_mb=size_mb)
         return port, model_field
 
     def backend_meta(self, alias):
@@ -1146,7 +1191,18 @@ class Manager:
             for b in self.backends.values():
                 item = {"alias": b.alias, "port": b.port, "size_mb": b.size_mb,
                         "idle_s": int(now - b.last_used),
-                        "inflight": b.inflight}
+                        "inflight": b.inflight,
+                        "context": b.context,
+                        "keep_warm_left_s": None}
+                if not b.inflight and KEEP_WARM_S > 0:
+                    item["keep_warm_left_s"] = max(
+                        0, int(KEEP_WARM_S - (now - b.last_used)))
+                if b.cached_tokens is not None:
+                    item["cached_tokens"] = b.cached_tokens
+                if b.inflight:
+                    item["client_addr"] = b.client_addr
+                    item["client_app"] = b.client_app
+                    item["max_tokens"] = b.max_tokens
                 if b.inflight and b.started:
                     item["busy_s"] = int(now - b.started)
                     if b.prompt_tokens:
@@ -1160,10 +1216,23 @@ class Manager:
                     if produced > 0:
                         item["phase"] = "generating"
                         item["output_tokens"] = produced
+                        item["live_tps"] = self._live_tps(b, now)
                     else:
                         item["phase"] = "reading prompt"
                 out.append(item)
             return out
+
+    @staticmethod
+    def _live_tps(b, now):
+        """Deltas per second over the last 2 s of progress() calls. None for
+        omlx (about 14 tokens per delta, so a delta rate would be false) and
+        when fewer than 2 points fall in the window."""
+        if b.engine == "omlx":
+            return None
+        pts = [p for p in tuple(b.progress_pts) if p[0] >= now - 2.0]
+        if len(pts) < 2 or pts[-1][0] <= pts[0][0]:
+            return None
+        return round((pts[-1][1] - pts[0][1]) / (pts[-1][0] - pts[0][0]), 1)
 
     def progress(self, alias, produced):
         """Update the live output-token count for the in-flight request.
@@ -1174,8 +1243,10 @@ class Manager:
         b = self.backends.get(alias)
         if b is not None:
             b.produced = produced
+            b.progress_pts.append((time.monotonic(), produced))
 
-    def begin(self, alias, prompt_tokens=None):
+    def begin(self, alias, prompt_tokens=None, client_addr=None, client_app=None,
+              max_tokens=None):
         """Mark a request as in flight against this backend.
 
         The prompt size and start time are kept so /health can say what the
@@ -1192,6 +1263,11 @@ class Manager:
                 b.started = time.monotonic()
                 b.prompt_tokens = prompt_tokens
                 b.produced = 0
+                b.client_addr = client_addr
+                b.client_app = client_app
+                b.max_tokens = max_tokens
+                b.cached_tokens = None
+                b.progress_pts.clear()
             return b
 
     def end(self, alias, backend=None):
@@ -1244,6 +1320,8 @@ class Manager:
                 pass
             log("unloaded %s (idle %ds, %d MB)"
                 % (b.alias, int(now - b.last_used), b.size_mb))
+            TELEMETRY.event("idle_unloaded", b.alias, idle_s=int(now - b.last_used),
+                            size_mb=b.size_mb)
         return [b.alias for b in victims]
 
     def unload_all(self):
@@ -1271,6 +1349,7 @@ class Manager:
                     b.proc.kill()
                 except Exception:
                     pass
+            TELEMETRY.event("admin_unloaded", b.alias, size_mb=b.size_mb)
         return freed
 
     def shutdown(self):
@@ -1398,7 +1477,14 @@ class Handler(BaseHTTPRequestHandler):
         # this, and a generation that outlives the keep-warm window was being
         # terminated while it streamed.
         chars = _prompt_chars(body) or 0
-        held = MANAGER.begin(alias, int(chars / _CHARS_PER_TOKEN) if chars else None)
+        max_tokens = body.get("max_tokens")
+        if max_tokens is None:
+            max_tokens = body.get("max_completion_tokens")
+        held = MANAGER.begin(alias, int(chars / _CHARS_PER_TOKEN) if chars else None,
+                             client_addr=self.client_address[0],
+                             client_app=telemetry.client_tag(self.headers.get("User-Agent")),
+                             max_tokens=max_tokens)
+        self._held = held
         try:
             self._proxy(alias, port, model_field, body, reader)
         finally:
@@ -1631,6 +1717,9 @@ class Handler(BaseHTTPRequestHandler):
             elif rep["output_tokens"] is None and sm is not None:
                 rep["output_tokens"] = 0
             fin = finish or reply_finish
+            held = getattr(self, "_held", None)
+            if held is not None and rep.get("cached_tokens") is not None:
+                held.cached_tokens = rep["cached_tokens"]
             ua = self.headers.get("User-Agent")
             extra = dict(rep)
             extra.update({
