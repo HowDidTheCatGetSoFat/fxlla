@@ -399,6 +399,32 @@ class TestMediaReader(ReaderBase):
         self.assertIsNone(by["1700000002-abcdef"]["eta_s"])
         self.assertEqual([q["id"] for q in m["queued"]], ["1700000003-abcdef"])
 
+    def test_malformed_record_does_not_blank_section(self):
+        self.alive.add(222)
+        self.write_job(job(1, status="running", started="x", finished=None,
+                           pid=222, steps="4", width="w", peak_rss_mb="big"))
+        self.write_job(job(2, status="done", started=NOW - 100,
+                           finished=NOW - 50))
+        m = self.reader.media()
+        self.assertEqual([r["id"] for r in m["recent"]], ["1700000002-abcdef"])
+        self.assertEqual(m["today"]["done"], 1)
+        self.assertEqual(m["today"]["gpu_s"], 50)
+        run = m["running"]
+        self.assertTrue(all(r["started"] is None for r in run))
+        self.assertTrue(all(r["steps"] is None for r in run))
+
+    def test_record_that_raises_is_skipped(self):
+        self.write_job(job(1, status="done", progress=5))
+        self.write_job(job(2, status="done"))
+        orig = self.reader._item
+        def boom(rec, status, now):
+            if rec["id"].startswith("1700000001"):
+                raise TypeError("bad")
+            return orig(rec, status, now)
+        self.reader._item = boom
+        m = self.reader.media()
+        self.assertEqual([r["id"] for r in m["recent"]], ["1700000002-abcdef"])
+
     def test_dead_worker_is_died_in_recent_and_file_untouched(self):
         rec = job(1, status="running", finished=None, pid=999)
         self.write_job(rec)

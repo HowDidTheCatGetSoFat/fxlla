@@ -250,8 +250,7 @@ class ToolsReader:
         item["status"] = status
         for k in ("created", "started", "finished", "peak_rss_mb", "steps",
                   "width", "height"):
-            if not isinstance(rec.get(k), str):
-                item[k] = _num(rec.get(k))
+            item[k] = _num(rec.get(k))
         if isinstance(item["model"], str) and item["model"][:1] in "/~":
             item["model"] = os.path.basename(item["model"].rstrip("/"))
         item["progress"] = _progress(rec.get("progress"))
@@ -265,17 +264,21 @@ class ToolsReader:
             start = _start_of_day(now)
             finished = []
             for rec in self._jobs():
-                status = self._status(rec)
-                item = self._item(rec, status, now)
-                if status == "running":
-                    t0 = item["started"] or item["created"]
-                    item["elapsed_s"] = int(now - t0) if t0 else None
-                    item["eta_s"] = _eta(item["elapsed_s"], item["progress"])
-                    out["running"].append(item)
-                elif status == "queued":
-                    out["queued"].append(item)
-                elif status in _FINISHED:
-                    finished.append(item)
+                try:
+                    status = self._status(rec)
+                    item = self._item(rec, status, now)
+                    if status == "running":
+                        t0 = item["started"] or item["created"]
+                        item["elapsed_s"] = int(now - t0) if t0 else None
+                        item["eta_s"] = _eta(item["elapsed_s"],
+                                             item["progress"])
+                        out["running"].append(item)
+                    elif status == "queued":
+                        out["queued"].append(item)
+                    elif status in _FINISHED:
+                        finished.append(item)
+                except Exception:
+                    continue
             out["running"].sort(key=lambda i: i["created"] or 0)
             out["queued"].sort(key=lambda i: i["created"] or 0)
             finished.sort(key=lambda i: i["finished"] or i["created"] or 0,
