@@ -33,6 +33,27 @@ class H(BaseHTTPRequestHandler):
             self._send(401, "no")
         elif self.path == "/junk":
             self._send(200, "not json")
+        elif self.path == "/redir":
+            self.send_response(302)
+            self.send_header("Location", SEEN["other"] + "/target")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        elif self.path == "/target":
+            SEEN["target_auth"] = self.headers.get("Authorization")
+            self._send(200, "{}")
+        elif self.path == "/nan":
+            self._send(200, '{"a":NaN,"b":Infinity,"c":1e999,"d":2}')
+        elif self.path == "/drip":
+            self.send_response(200)
+            self.send_header("Content-Length", "100000")
+            self.end_headers()
+            try:
+                for _ in range(100):
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                    time.sleep(0.1)
+            except OSError:
+                pass
         elif self.path == "/slow":
             time.sleep(2)
             try:
@@ -74,6 +95,50 @@ class ExtHttpTest(unittest.TestCase):
             ext_http.get_json(self.base + "/slow", timeout=0.2)
         self.assertEqual(c.exception.reason, "timeout")
         self.assertLess(time.time() - t0, 1.0)
+
+    def test_redirect_not_followed_and_no_key_leak(self):
+        other = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        other.daemon_threads = True
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        SEEN["other"] = "http://127.0.0.1:%d" % other.server_address[1]
+        SEEN.pop("target_auth", None)
+        try:
+            with self.assertRaises(ext_http.ProbeError) as c:
+                ext_http.get_json(self.base + "/redir",
+                                  {"Authorization": "Bearer " + KEY})
+            self.assertEqual(c.exception.reason, "http 302")
+            self.assertNotIn("target_auth", SEEN)
+        finally:
+            other.shutdown()
+            other.server_close()
+
+    def test_env_proxy_ignored(self):
+        old = {k: os.environ.get(k) for k in ("http_proxy", "HTTP_PROXY", "no_proxy", "NO_PROXY")}
+        try:
+            os.environ["http_proxy"] = os.environ["HTTP_PROXY"] = "http://127.0.0.1:9"
+            os.environ.pop("no_proxy", None)
+            os.environ.pop("NO_PROXY", None)
+            self.assertEqual(ext_http.get_json(self.base + "/ok"), {"a": 1})
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_non_finite_constants_become_none(self):
+        r = ext_http.get_json(self.base + "/nan")
+        self.assertIsNone(r["a"])
+        self.assertIsNone(r["b"])
+        self.assertIsNone(r["c"])
+        self.assertEqual(r["d"], 2)
+
+    def test_slow_drip_hits_total_deadline(self):
+        t0 = time.time()
+        with self.assertRaises(ext_http.ProbeError) as c:
+            ext_http.get_json(self.base + "/drip", timeout=0.4)
+        self.assertEqual(c.exception.reason, "timeout")
+        self.assertLess(time.time() - t0, 1.2)
 
     def test_refused(self):
         s = socket.socket()
