@@ -178,6 +178,9 @@ class StreamMetrics:
         self.first = None           # time.monotonic() of the first token
         self.deltas = 0
         self.usage_tokens = None
+        self.usage = None           # last `usage` object the stream carried
+        self.timings = None         # last `timings` object the stream carried
+        self.finish = None          # last non-empty finish_reason
         self._buf = ""
 
     def feed(self, chunk_bytes):
@@ -196,13 +199,28 @@ class StreamMetrics:
             obj = json.loads(data)
         except ValueError:
             return
+        if not isinstance(obj, dict):
+            return
         ct = _usage_completion_tokens(obj)
         if ct is not None:
             self.usage_tokens = ct
+        if isinstance(obj.get("usage"), dict):
+            self.usage = obj["usage"]
+        if isinstance(obj.get("timings"), dict):
+            self.timings = obj["timings"]
+        for ch in obj.get("choices") or []:
+            if isinstance(ch, dict):
+                fr = ch.get("finish_reason")
+                if isinstance(fr, str) and fr:
+                    self.finish = fr
         if _delta_generated_text(obj):
             if self.first is None:
                 self.first = time.monotonic()
             self.deltas += 1
+
+    def report(self):
+        """What the engine said about this request, in fixed fields."""
+        return engine_report(self.usage, self.timings)
 
     def result(self, end):
         """Return (ttft_ms, tps, tokens); ttft/tps are None when unmeasurable.
@@ -231,6 +249,53 @@ class StreamMetrics:
             if rate <= IMPLAUSIBLE_TPS:
                 tps = round(rate, 1)
         return ttft_ms, tps, tokens
+
+
+class UsageChunkStripper:
+    """Remove the usage-only SSE event the gateway asked the engine for.
+
+    When the gateway injects stream_options.include_usage, the engine appends
+    one event with `choices == []` and a `usage` key that the client never
+    requested. This drops exactly those events and passes every other byte
+    through unchanged and in order. A complete event is emitted at once; only
+    an incomplete tail is held back, so streaming stays incremental.
+    """
+
+    def __init__(self):
+        self._buf = b""
+
+    @staticmethod
+    def _is_usage_only(event):
+        data = []
+        for line in event.splitlines():
+            if line.startswith(b"data:"):
+                data.append(line[5:].strip())
+        if not data:
+            return False
+        try:
+            obj = json.loads(b"\n".join(data))
+        except ValueError:
+            return False
+        return (isinstance(obj, dict) and obj.get("choices") == []
+                and "usage" in obj)
+
+    def consume(self, data):
+        self._buf += data
+        out = []
+        while True:
+            hits = [(i, len(t)) for t in (b"\r\n\r\n", b"\n\n")
+                    for i in [self._buf.find(t)] if i >= 0]
+            if not hits:
+                break
+            i, n = min(hits)
+            event, self._buf = self._buf[:i + n], self._buf[i + n:]
+            if not self._is_usage_only(event):
+                out.append(event)
+        return b"".join(out)
+
+    def finish(self):
+        tail, self._buf = self._buf, b""
+        return tail
 
 
 def usage_from_json(body_bytes):

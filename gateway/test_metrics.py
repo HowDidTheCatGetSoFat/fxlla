@@ -8,6 +8,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 metrics = importlib.import_module("metrics")
 
+FIX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+
 
 def _sse(*objs):
     return "".join("data: " + json.dumps(o) + "\n\n" for o in objs).encode()
@@ -346,6 +348,59 @@ class TestEngineReport(unittest.TestCase):
         self.assertEqual(r["prompt_tokens"], big)
         self.assertEqual(r["prompt_ms"], big)
         self.assertEqual(r["decode_ms"], big * 1000)
+
+USAGE_ONLY = b'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2}}\n\n'
+BODY = (b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n')
+
+
+class TestStreamKeepsReport(unittest.TestCase):
+    def test_stream_keeps_usage_timings_and_finish_mtplx(self):
+        sm = metrics.StreamMetrics(0.0)
+        with open(FIX + "/mtplx-stream.sse", "rb") as f:
+            sm.feed(f.read())
+        self.assertEqual(sm.finish, "stop")
+        self.assertEqual(sm.report()["draft_accepted"], 79)
+
+    def test_stream_keeps_omlx_usage(self):
+        sm = metrics.StreamMetrics(0.0)
+        with open(FIX + "/omlx-stream.sse", "rb") as f:
+            sm.feed(f.read())
+        self.assertEqual(sm.report()["output_tokens"], 300)
+        self.assertEqual(sm.finish, "length")
+
+
+class TestUsageChunkStripper(unittest.TestCase):
+    def test_stripper_removes_only_the_usage_only_event(self):
+        s = metrics.UsageChunkStripper()
+        out = s.consume(BODY + USAGE_ONLY + b"data: [DONE]\n\n") + s.finish()
+        self.assertEqual(out, BODY + b"data: [DONE]\n\n")
+
+    def test_stripper_survives_any_split_point(self):
+        whole = BODY + USAGE_ONLY + b"data: [DONE]\n\n"
+        for cut in range(1, len(whole)):
+            s = metrics.UsageChunkStripper()
+            out = s.consume(whole[:cut]) + s.consume(whole[cut:]) + s.finish()
+            self.assertEqual(out, BODY + b"data: [DONE]\n\n", cut)
+
+    def test_stripper_handles_crlf_events(self):
+        s = metrics.UsageChunkStripper()
+        crlf = USAGE_ONLY.replace(b"\n\n", b"\r\n\r\n")
+        self.assertEqual(s.consume(BODY + crlf) + s.finish(), BODY)
+
+    def test_stripper_forwards_usage_that_rides_with_choices(self):
+        ev = b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":2}}\n\n'
+        s = metrics.UsageChunkStripper()
+        self.assertEqual(s.consume(ev) + s.finish(), ev)
+
+    def test_stripper_passes_non_json_and_comments_through(self):
+        raw = b": keepalive\n\ndata: not json\n\n"
+        s = metrics.UsageChunkStripper()
+        self.assertEqual(s.consume(raw) + s.finish(), raw)
+
+    def test_stripper_emits_complete_events_at_once(self):
+        s = metrics.UsageChunkStripper()
+        self.assertEqual(s.consume(BODY + b"data: {"), BODY)
 
 
 if __name__ == "__main__":
