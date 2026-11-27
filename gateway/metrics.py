@@ -307,17 +307,23 @@ def usage_from_json(body_bytes):
     return _usage_completion_tokens(obj)
 
 
-def build_sample(ts, model, engine, ram_mb, ttft_ms, tps):
-    """One time-series row, shaped like the CLI probe plus a source marker."""
-    return {
+def build_sample(ts, model, engine, ram_mb, ttft_ms, tps, **extra):
+    """One time-series row, shaped like the CLI probe plus a source marker.
+
+    `extra` fields are merged after the base keys, which cannot be overridden.
+    """
+    row = {
         "ts": int(ts),
         "model": model,
         "engine": engine,
-        "ram_mb": int(ram_mb),
+        "ram_mb": int(ram_mb) if ram_mb is not None else None,
         "ttft_ms": ttft_ms,
         "tps": tps,
         "source": "gateway",
     }
+    for k, v in extra.items():
+        row.setdefault(k, v)
+    return row
 
 
 def _maybe_trim(path, cap):

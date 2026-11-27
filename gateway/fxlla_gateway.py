@@ -77,6 +77,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ggufmeta  # noqa: E402  (local module, added to sys.path above)
 import metrics  # noqa: E402
+import telemetry  # noqa: E402
 
 # Poll interval while waiting for a backend to answer. Small enough that a fast
 # model load is not rounded up to the next whole second.
@@ -1277,6 +1278,11 @@ class Manager:
 
 
 MANAGER = Manager()
+TELEMETRY = telemetry.Telemetry()
+
+# Engines whose servers honor stream_options.include_usage. mtplx is left out:
+# it reports usage on its own terms and must not be sent options it may reject.
+_USAGE_INJECT_ENGINES = {"mlx", "gguf", "omlx"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1403,11 +1409,27 @@ class Handler(BaseHTTPRequestHandler):
         if reader:
             log("read the image with %s, answering with %s" % (reader, alias))
         body["model"] = model_field
+        measure = metrics.is_completion_path(self.path)
+        # Ask the engine for exact usage when the client did not. Decided from
+        # the resident backend's own engine, read once before dispatch. The
+        # extra usage-only event is stripped again before the client sees it.
+        injected = False
+        if measure and body.get("stream"):
+            try:
+                opts = body.get("stream_options")
+                asked = isinstance(opts, dict) and opts.get("include_usage")
+                meta = MANAGER.backend_meta(alias)
+                if (not asked and meta is not None
+                        and meta[1] in _USAGE_INJECT_ENGINES):
+                    base = opts if isinstance(opts, dict) else {}
+                    body["stream_options"] = {**base, "include_usage": True}
+                    injected = True
+            except Exception as e:  # noqa: BLE001
+                log("metrics: %s" % e)
         payload = json.dumps(body).encode()
         upstream = "http://127.0.0.1:%d%s" % (port, self.path)
         req = urllib.request.Request(upstream, data=payload,
                                      headers={"Content-Type": "application/json"})
-        measure = metrics.is_completion_path(self.path)
         start = time.monotonic()
         try:
             resp = urllib.request.urlopen(req, timeout=600)
@@ -1420,9 +1442,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+            if measure:
+                self._record(alias, start, None, None, body, "error")
             return
         except Exception as e:
             self._json(502, {"error": {"message": "backend error: %s" % e}})
+            if measure:
+                self._record(alias, start, None, None, body, "error")
             return
 
         # stream the response back (works for both plain JSON and SSE)
@@ -1438,6 +1464,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         streaming = "event-stream" in ctype
         sm = metrics.StreamMetrics(start) if (measure and streaming) else None
+        stripper = metrics.UsageChunkStripper() if (injected and streaming) else None
         # Buffered whenever the reply might carry a tool call the backend's own
         # parser dropped into the text channel, since repairing it means
         # rewriting the body. Metrics want the buffer anyway.
@@ -1450,11 +1477,19 @@ class Handler(BaseHTTPRequestHandler):
         # every reply its incremental output to fix the few that need it.
         seen = _StreamRescue(body.get("tools")) if (rescue and streaming) else None
         pending = b""
+        finish = None   # "error" or "client_gone" when the exchange broke
+        got = 0
+        cut = False
         try:
             while True:
-                chunk = resp.read(1024)
+                try:
+                    chunk = resp.read(1024)
+                except Exception:
+                    finish = "error"   # the upstream died mid-reply
+                    break
                 if not chunk:
                     break
+                got += len(chunk)
                 if sm is not None:
                     try:
                         sm.feed(chunk)
@@ -1466,29 +1501,67 @@ class Handler(BaseHTTPRequestHandler):
                         sm = None  # never let metrics break the proxy
                 if buf is not None and len(buf) < 4 * 1024 * 1024:
                     buf.extend(chunk)
+                if stripper is not None:
+                    chunk = stripper.consume(chunk)
                 if seen is not None:
                     pending += chunk
                     out, pending = seen.consume(pending)
                     chunk = out
-                    if not chunk:
-                        continue
+                if not chunk:
+                    continue
                 if not (rescue and not streaming):
-                    self.wfile.write(b"%X\r\n%s\r\n" % (len(chunk), chunk))
-                    self.wfile.flush()
-            if rescue and not streaming:
-                out = self._rescue_tool_calls(bytes(buf), body.get("tools"))
-                self.wfile.write(b"%X\r\n%s\r\n" % (len(out), out))
-                self.wfile.flush()
-            elif seen is not None:
-                tail = seen.finish(pending)
-                if tail:
-                    self.wfile.write(b"%X\r\n%s\r\n" % (len(tail), tail))
-                    self.wfile.flush()
-            self.wfile.write(b"0\r\n\r\n")
+                    try:
+                        self.wfile.write(b"%X\r\n%s\r\n" % (len(chunk), chunk))
+                        self.wfile.flush()
+                    except OSError:
+                        finish = "client_gone"
+                        break
+            if finish is None:
+                # http.client reports a short body as a clean EOF when read in
+                # pieces, so a stream cut off upstream is told apart here. This
+                # only classifies the record; the client still gets a normal end.
+                try:
+                    want = int(resp.headers.get("Content-Length", ""))
+                except ValueError:
+                    want = None
+                if want is not None and got < want:
+                    cut = True
+                elif sm is not None and sm.finish is None:
+                    cut = True   # an SSE reply with no finish_reason
+            if finish is None:
+                try:
+                    if stripper is not None:
+                        tail = stripper.finish()
+                        if seen is not None:
+                            pending += tail
+                        elif tail:
+                            self.wfile.write(b"%X\r\n%s\r\n" % (len(tail), tail))
+                    if rescue and not streaming:
+                        out = self._rescue_tool_calls(bytes(buf), body.get("tools"))
+                        self.wfile.write(b"%X\r\n%s\r\n" % (len(out), out))
+                        self.wfile.flush()
+                    elif seen is not None:
+                        tail = seen.finish(pending)
+                        if tail:
+                            self.wfile.write(b"%X\r\n%s\r\n" % (len(tail), tail))
+                            self.wfile.flush()
+                    self.wfile.write(b"0\r\n\r\n")
+                except OSError:
+                    finish = "client_gone"
         except Exception:
-            pass
+            finish = finish or "error"
+        if finish is None and cut:
+            finish = "error"
+        elif finish is not None:
+            # No terminating chunk was sent, so the connection cannot be reused.
+            self.close_connection = True
+            try:
+                resp.close()
+            except Exception:
+                pass
         if measure:
-            self._record(alias, start, sm, bytes(buf) if buf is not None else None)
+            self._record(alias, start, sm, bytes(buf) if buf is not None else None,
+                         body, finish)
 
     def _rescue_tool_calls(self, raw, tools):
         """The response body, with a text-channel tool call promoted if there
@@ -1515,32 +1588,66 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return raw
 
-    def _record(self, alias, start, sm, body_bytes):
-        """Append one passive metrics sample derived from a completed request.
+    def _record(self, alias, start, sm, body_bytes, body, finish=None):
+        """Record one completed request: always in the in-memory telemetry,
+        and in stats.jsonl when the backend is still resident (which is what
+        keeps ram_mb real).
 
         Best-effort: any failure here is logged and swallowed so telemetry never
         affects the proxied response."""
         try:
             end = time.monotonic()
+            rep = metrics.engine_report(None, None)
+            estimated = False
+            ttft_ms = tps = None
+            tokens = 0
+            reply_finish = None
             if sm is not None:
                 ttft_ms, tps, tokens = sm.result(end)
+                rep = sm.report()
+                reply_finish = sm.finish
+                if rep["output_tokens"] is None and tokens:
+                    rep["output_tokens"] = tokens
+                    estimated = True
             elif body_bytes is not None:
                 # Non-streamed: no first-token signal, so tps is over the whole
                 # wall time (includes prompt processing); an approximation.
                 tokens = metrics.usage_from_json(body_bytes)
-                ttft_ms = None
                 tps = round(tokens / (end - start), 1) if tokens and end > start else None
-            else:
-                return
-            if not tokens:
-                return  # nothing generated (e.g. an error body): do not record
+                try:
+                    doc = json.loads(body_bytes)
+                    rep = metrics.engine_report(doc.get("usage"), doc.get("timings"))
+                    reply_finish = (doc.get("choices") or [{}])[0].get("finish_reason")
+                except Exception:  # noqa: BLE001
+                    pass
+            if rep["output_tokens"] is None and sm is None and finish == "error":
+                rep["output_tokens"] = 0
+            elif rep["output_tokens"] is None and sm is not None:
+                rep["output_tokens"] = 0
+            fin = finish or reply_finish
+            ua = self.headers.get("User-Agent")
+            extra = dict(rep)
+            extra.update({
+                "id": TELEMETRY.new_id(),
+                "output_estimated": estimated,
+                "duration_ms": int((end - start) * 1000),
+                "finish": fin,
+                "stream": bool(body.get("stream")),
+                "client_addr": self.client_address[0],
+                "client_app": telemetry.client_tag(ua),
+            })
             meta = MANAGER.backend_meta(alias)
             if meta is None:
-                return  # backend evicted between response and record
+                # evicted between response and record: no RSS to report
+                extra.update(model=alias, ts=int(time.time()), ram_mb=None)
+                TELEMETRY.record(metrics.build_sample(
+                    time.time(), alias, None, None, ttft_ms, tps, **extra))
+                return
             pid, engine = meta
             sample = metrics.build_sample(
-                time.time(), alias, engine, rss_mb(pid), ttft_ms, tps)
+                time.time(), alias, engine, rss_mb(pid), ttft_ms, tps, **extra)
             metrics.append_sample(metrics.stats_file(), sample)
+            TELEMETRY.record(sample)
         except Exception as e:
             log("metrics: %s" % e)
 
