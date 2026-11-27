@@ -636,6 +636,7 @@ def _emit(resp):
 
 
 def main():
+    os.environ["FXLLA_CALLER"] = "mcp"  # inherited by the subprocesses below
     running = []
     for line in sys.stdin:
         line = line.strip()

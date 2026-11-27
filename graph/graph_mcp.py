@@ -85,6 +85,7 @@ def _err(mid, code, message):
 
 
 def main():
+    os.environ["FXLLA_CALLER"] = "mcp"  # inherited by the subprocesses below
     for line in sys.stdin:
         line = line.strip()
         if not line:
