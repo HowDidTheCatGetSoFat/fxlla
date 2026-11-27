@@ -60,8 +60,11 @@ class _Backend(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
         out = SSE
+        if mode == "nofinish":
+            out = (b'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n'
+                   b'data: [DONE]\n\n')
         if (body.get("stream_options") or {}).get("include_usage"):
-            out = SSE.replace(b"data: [DONE]", USAGE_ONLY + b"data: [DONE]")
+            out = out.replace(b"data: [DONE]", USAGE_ONLY + b"data: [DONE]")
         type(self).sent = out
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -252,6 +255,40 @@ class TestGatewayE2E(unittest.TestCase):
         conn.close()
         _Backend.release.set()
         self.assertEqual(self._last_row(timeout=20)["finish"], "client_gone")
+
+    def test_done_without_finish_reason_is_not_an_error(self):
+        _Backend.mode = "nofinish"
+        with urllib.request.urlopen(self._post(), timeout=10) as r:
+            self.assertIn(b"[DONE]", r.read())
+        self.assertIsNone(self._last_row()["finish"])
+
+    def test_evicted_backend_goes_to_telemetry_only(self):
+        real = gw.MANAGER.backend_meta
+        calls = []
+
+        def meta(alias):
+            calls.append(alias)
+            return real(alias) if len(calls) == 1 else None
+
+        seen = []
+        orig = gw.TELEMETRY.record
+        gw.MANAGER.backend_meta = meta
+        gw.TELEMETRY.record = lambda rec: (seen.append(dict(rec)), orig(rec))
+        try:
+            with urllib.request.urlopen(self._post(), timeout=10) as r:
+                r.read()
+            for _ in range(100):
+                if seen:
+                    break
+                time.sleep(0.05)
+        finally:
+            del gw.MANAGER.backend_meta
+            gw.TELEMETRY.record = orig
+        self.assertEqual(len(seen), 1)
+        self.assertIsNone(seen[0]["ram_mb"])
+        self.assertEqual(seen[0]["model"], "fake")
+        self.assertEqual(seen[0]["output_tokens"], 2)
+        self.assertFalse(os.path.exists(self.stats))
 
     def test_old_fields_keep_their_meaning(self):
         with urllib.request.urlopen(self._post(), timeout=10) as r:

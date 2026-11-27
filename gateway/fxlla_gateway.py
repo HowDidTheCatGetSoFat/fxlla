@@ -1480,6 +1480,8 @@ class Handler(BaseHTTPRequestHandler):
         finish = None   # "error" or "client_gone" when the exchange broke
         got = 0
         cut = False
+        done = False
+        tail8 = b""
         try:
             while True:
                 try:
@@ -1490,6 +1492,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not chunk:
                     break
                 got += len(chunk)
+                if not done:
+                    # a marker split across two reads is still found
+                    done = b"data: [DONE]" in tail8 + chunk
+                    tail8 = (tail8 + chunk)[-16:]
                 if sm is not None:
                     try:
                         sm.feed(chunk)
@@ -1526,8 +1532,8 @@ class Handler(BaseHTTPRequestHandler):
                     want = None
                 if want is not None and got < want:
                     cut = True
-                elif sm is not None and sm.finish is None:
-                    cut = True   # an SSE reply with no finish_reason
+                elif sm is not None and sm.finish is None and not done:
+                    cut = True   # ended with neither [DONE] nor a finish_reason
             if finish is None:
                 try:
                     if stripper is not None:
@@ -1639,7 +1645,6 @@ class Handler(BaseHTTPRequestHandler):
             meta = MANAGER.backend_meta(alias)
             if meta is None:
                 # evicted between response and record: no RSS to report
-                extra.update(model=alias, ts=int(time.time()), ram_mb=None)
                 TELEMETRY.record(metrics.build_sample(
                     time.time(), alias, None, None, ttft_ms, tps, **extra))
                 return
