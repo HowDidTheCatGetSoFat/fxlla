@@ -51,6 +51,40 @@ class LogTests(unittest.TestCase):
         s = self.log().today_stats()
         self.assertEqual(s, {"requests": 4, "median_ms": 1310.0})
 
+    def test_first_read_is_bounded_and_drops_partial_line(self):
+        old = ext_local.MAX_READ
+        ext_local.MAX_READ = 4096
+        try:
+            self.path.write_bytes(b"x" * 100000 + b"\n" + LINE.encode() * 3)
+            lg = self.log()
+            s = lg.today_stats()
+            self.assertEqual(s["requests"], 3)
+            self.assertLessEqual(len(lg._pending), ext_local.MAX_PENDING)
+        finally:
+            ext_local.MAX_READ = old
+
+    def test_incremental_read_is_chunked(self):
+        old = ext_local.MAX_READ
+        ext_local.MAX_READ = 200
+        try:
+            self.path.write_bytes(LINE.encode())
+            lg = self.log()
+            lg.today_stats()
+            with open(self.path, "ab") as fh:
+                fh.write(LINE.encode() * 9)
+            for _ in range(20):
+                s = lg.today_stats()
+            self.assertEqual(s["requests"], 10)
+        finally:
+            ext_local.MAX_READ = old
+
+    def test_newline_less_file_caps_pending(self):
+        self.path.write_bytes(b"\x00" * 500000)
+        lg = self.log()
+        for _ in range(10):
+            lg.today_stats()
+        self.assertLessEqual(len(lg._pending), ext_local.MAX_PENDING)
+
     def test_log_incremental(self):
         self.path.write_bytes((FX / "ollama-server.log").read_bytes())
         lg = self.log()

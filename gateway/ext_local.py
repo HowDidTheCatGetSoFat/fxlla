@@ -19,6 +19,8 @@ GEN_PATHS = (
 )
 
 MAX_LATENCIES = 10000
+MAX_READ = 1024 * 1024      # bytes read from the log per refresh
+MAX_PENDING = 64 * 1024     # longest partial line kept between refreshes
 _MB = 1024 * 1024
 _GIB = 1024 ** 3
 
@@ -91,6 +93,7 @@ class OllamaLog:
         self._today = today
         self._offset = 0
         self._pending = b""
+        self._skip = False      # discard bytes up to the next newline
         self._date = None
         self._lat = []
         self._count = 0
@@ -98,6 +101,7 @@ class OllamaLog:
     def _reset(self):
         self._offset = 0
         self._pending = b""
+        self._skip = False
         self._lat = []
         self._count = 0
 
@@ -127,13 +131,26 @@ class OllamaLog:
             self._reset()
         if size == self._offset:
             return
+        if size - self._offset > MAX_READ and self._offset == 0:
+            # First read or reset on a big file: only the tail matters.
+            self._offset = size - MAX_READ
+            self._skip = True
         with open(self.path, "rb") as f:
             f.seek(self._offset)
-            data = f.read(size - self._offset)
+            data = f.read(min(size - self._offset, MAX_READ))
         self._offset += len(data)
+        if self._skip:
+            nl = data.find(b"\n")
+            if nl < 0:
+                return
+            data = data[nl + 1:]
+            self._skip = False
         data = self._pending + data
         parts = data.split(b"\n")
         self._pending = parts.pop()
+        if len(self._pending) > MAX_PENDING:
+            self._pending = b""
+            self._skip = True
         for raw in parts:
             self._ingest(raw.decode("utf-8", "replace").rstrip("\r"), today)
 
