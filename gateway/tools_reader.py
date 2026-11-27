@@ -98,6 +98,21 @@ def _today(recs, now):
     return [r for r in recs if (_num(r.get("ts")) or 0) >= start]
 
 
+def empty_snapshot():
+    return {"kb": {"recent": [],
+                   "today": {"searches": 0, "adds": 0, "avg_search_ms": None,
+                             "cold_starts": 0},
+                   "bases": [], "db_bytes": None},
+            "graph": {"recent": [],
+                      "today": {"queries": 0, "indexes": 0,
+                                "avg_query_ms": None},
+                      "stats": {"files": None, "defs": None, "refs": None,
+                                "indexed_at": None}},
+            "media": {"running": [], "queued": [], "recent": [],
+                      "today": {"jobs": 0, "done": 0, "failed": 0,
+                                "gpu_s": 0}}}
+
+
 class ToolsReader:
     def __init__(self, store, clock=time.time, alive=_pid_alive):
         self.store = store
