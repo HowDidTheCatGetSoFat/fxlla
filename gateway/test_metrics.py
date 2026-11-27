@@ -332,6 +332,13 @@ class TestEngineReport(unittest.TestCase):
         self.assertIsNone(r["prompt_tokens"])
         self.assertIsNone(r["prompt_ms"])
 
+    def test_non_finite_numbers_are_none_not_an_exception(self):
+        r = metrics.engine_report(
+            {"generation_duration": float("inf"), "prompt_eval_duration": 1e308},
+            {"prompt_ms": float("nan"), "predicted_ms": float("-inf")})
+        self.assertIsNone(r["prompt_ms"])
+        self.assertIsNone(r["decode_ms"])
+
 
 if __name__ == "__main__":
     unittest.main()

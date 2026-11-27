@@ -9,6 +9,7 @@ the gateway feeds streamed bytes to StreamMetrics and calls append_sample once
 per completed request.
 """
 import json
+import math
 import os
 import threading
 import time
@@ -102,7 +103,10 @@ def _int(v):
 
 
 def _num(v):
-    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    # json.loads accepts NaN and Infinity; they are not measurements.
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return v if math.isfinite(v) else None
 
 
 def _ms(v):
@@ -112,7 +116,8 @@ def _ms(v):
 
 def _secs_ms(v):
     v = _num(v)
-    return None if v is None else _ms(v * 1000)
+    # A huge finite value can overflow to inf once scaled; _num rejects that.
+    return None if v is None else _ms(_num(v * 1000))
 
 
 def _sub(d, key):
