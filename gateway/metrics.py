@@ -307,6 +307,10 @@ class UsageChunkStripper:
         tail, self._buf = self._buf, b""
         return tail
 
+    def held(self):
+        """The incomplete tail kept back so far."""
+        return self._buf
+
 
 def usage_from_json(body_bytes):
     """completion_tokens from a non-streamed response body, or None."""

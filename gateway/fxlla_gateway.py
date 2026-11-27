@@ -1599,7 +1599,16 @@ class Handler(BaseHTTPRequestHandler):
                 if buf is not None and len(buf) < 4 * 1024 * 1024:
                     buf.extend(chunk)
                 if stripper is not None:
-                    chunk = stripper.consume(chunk)
+                    held = b""
+                    try:
+                        held = stripper.held()
+                        chunk = stripper.consume(chunk)
+                    except Exception as e:  # noqa: BLE001
+                        # Fail open: the client gets the bytes as they came,
+                        # with whatever the stripper had held back.
+                        log("metrics: %s" % e)
+                        stripper = None
+                        chunk = held + chunk
                 if seen is not None:
                     pending += chunk
                     out, pending = seen.consume(pending)
@@ -1628,7 +1637,14 @@ class Handler(BaseHTTPRequestHandler):
             if finish is None:
                 try:
                     if stripper is not None:
-                        tail = stripper.finish()
+                        try:
+                            tail = stripper.finish()
+                        except Exception as e:  # noqa: BLE001
+                            log("metrics: %s" % e)
+                            try:
+                                tail = stripper.held()
+                            except Exception:  # noqa: BLE001
+                                tail = b""
                         if seen is not None:
                             pending += tail
                         elif tail:

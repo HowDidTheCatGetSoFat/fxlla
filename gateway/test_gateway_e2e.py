@@ -68,13 +68,22 @@ class _Backend(BaseHTTPRequestHandler):
         type(self).sent = out
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
-        if mode != "slow":
+        if mode not in ("slow", "paced"):
             self.send_header("Content-Length", str(len(out)))
         self.end_headers()
         if mode == "truncate":
             self.wfile.write(out[:len(out) // 2])
             self.wfile.flush()
             self.close_connection = True
+            return
+        if mode == "paced":
+            self.close_connection = True
+            for i in range(5):
+                self.wfile.write(b'data: {"choices":[{"delta":{"content":"tok%d"}}]}\n\n' % i)
+                self.wfile.flush()
+                time.sleep(0.3)
+            self.wfile.write(b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+                             b'data: [DONE]\n\n')
             return
         if mode == "slow":
             self.close_connection = True
@@ -213,6 +222,41 @@ class TestGatewayE2E(unittest.TestCase):
         with urllib.request.urlopen(self._post(), timeout=10) as r:
             r.read()
         self.assertNotIn("stream_options", _Backend.last_body)
+
+    def test_stripper_failure_forwards_the_stream_raw(self):
+        def boom(self, chunk):
+            raise RuntimeError("stripper broke")
+        real = gw.metrics.UsageChunkStripper.consume
+        gw.metrics.UsageChunkStripper.consume = boom
+        try:
+            with urllib.request.urlopen(self._post(), timeout=10) as r:
+                out = r.read()
+        finally:
+            gw.metrics.UsageChunkStripper.consume = real
+        self.assertEqual(out, _Backend.sent)
+
+    def test_stripper_finish_failure_still_ends_the_stream(self):
+        def boom(self):
+            raise RuntimeError("finish broke")
+        real = gw.metrics.UsageChunkStripper.finish
+        gw.metrics.UsageChunkStripper.finish = boom
+        try:
+            with urllib.request.urlopen(self._post(), timeout=10) as r:
+                out = r.read()
+        finally:
+            gw.metrics.UsageChunkStripper.finish = real
+        self.assertIn(b"[DONE]", out)
+        self.assertIn(b"Hi", out)
+
+    def test_stripped_stream_with_tools_reaches_the_client(self):
+        tools = [{"type": "function", "function": {
+            "name": "f", "parameters": {"type": "object", "properties": {}}}}]
+        with urllib.request.urlopen(self._post(tools=tools), timeout=10) as r:
+            out = r.read()
+        self.assertTrue(_Backend.last_body["stream_options"]["include_usage"])
+        self.assertIn(b"Hi", out)
+        self.assertIn(b"[DONE]", out)
+        self.assertNotIn(b'"usage"', out)
 
     def test_mtplx_is_never_injected(self):
         self._register("mtplx")
