@@ -20,6 +20,7 @@ Usage (normally driven via `fxlla kb`):
   core.py eval                  score retrieval quality on the repo's own docs
 """
 import argparse
+import contextlib
 import fcntl
 import glob
 import hashlib
@@ -34,6 +35,13 @@ import subprocess
 import sys
 import time
 import urllib.request
+
+sys.path.append(os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+try:
+    import fxlla_events
+except Exception:  # telemetry is optional: never block the tool on it
+    fxlla_events = None
 
 STORE = os.environ.get("FXLLA_STORE", "")
 KB_DIR = os.path.join(STORE, "kb")
@@ -151,6 +159,10 @@ def _require_server_model(wanted):
 # Runs a local llama.cpp embedding server for the lifetime of the context, or
 # reuses one that is already listening.
 class Embedder:
+    # True when this instance launched the embedding server (a cold start),
+    # false when it reused one that was already listening.
+    started = False
+
     def __enter__(self):
         # A server someone else started is not ours to stop. Reusing it is also
         # what makes repeated queries cost milliseconds: leave one running and
@@ -193,6 +205,7 @@ class Embedder:
                 ["llama-server", "--embeddings", "-m", model, "--host", "127.0.0.1",
                  "--port", str(EMBED_PORT)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.started = True
             deadline = time.time() + _READY_TIMEOUT
             while time.time() < deadline:
                 if _server_healthy():
@@ -310,6 +323,54 @@ def chunk_text(text, size=800, overlap=120):
     return out
 
 
+# Telemetry: one record per kb command in <state dir>/kb.jsonl, written after the
+# command finishes. Only counts, timings and the base name are recorded, never
+# query text, chunk text or paths. Commands fill in what they know with _note().
+_EVENT = {}
+
+
+def _note(**fields):
+    _EVENT.update(fields)
+
+
+def _error_line(code):
+    text = str(code).strip().splitlines()
+    first = text[0] if text else ""
+    home = os.path.expanduser("~")
+    if home and home != "/":
+        first = first.replace(home, "~")
+    return first[:200]
+
+
+@contextlib.contextmanager
+def _recorded(kind, defaults):
+    """Time a command and append its kb event. Never changes what it does."""
+    _EVENT.clear()
+    _EVENT.update(defaults)
+    begin = time.monotonic()
+    error = None
+    try:
+        yield
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            error = _error_line(e.code) or "exit %s" % (e.code,)
+        raise
+    except BaseException as e:
+        error = _error_line("%s: %s" % (type(e).__name__, e)) or type(e).__name__
+        raise
+    finally:
+        try:
+            if fxlla_events is not None:
+                rec = {"kind": kind}
+                rec.update(_EVENT)
+                rec["duration_ms"] = int((time.monotonic() - begin) * 1000)
+                rec["ok"] = error is None
+                rec["error"] = error
+                fxlla_events.append("kb", rec)
+        except Exception:
+            pass
+
+
 def cmd_ls(_args):
     con = _db()
     rows = con.execute(
@@ -391,6 +452,7 @@ def cmd_add(args):
             )
             con.commit()
             total += len(chunks)
+            _note(chunks_added=total)
             print(f"  {f}: {len(chunks)} chunks")
     print(f"indexed {len(files)} files, {total} chunks into '{args.name}'")
 
@@ -550,9 +612,11 @@ def cmd_search(args):
     if not n:
         sys.exit(f"knowledge base '{args.name}' is empty")
     with Embedder() as emb:
+        _note(embed_cold=bool(emb.started))
         qv = emb.embed([args.query])[0]
     _require_dim(con, args.name, qv)
     top = _top_k(con, args.name, qv, args.k, _load_vec(con))
+    _note(hits=len(top), top_score=round(top[0][0], 4) if top else None)
     if args.json:
         print(json.dumps([
             {"score": round(s, 4), "source": src, "chunk": idx, "text": txt}
@@ -694,6 +758,12 @@ def cmd_eval(args):
           "score: compare two runs only when the fingerprint matches.")
 
 
+# The basename of what was added; with several paths there is no single source.
+def _add_source(args):
+    paths = getattr(args, "paths", None) or []
+    return os.path.basename(os.path.normpath(paths[0])) if len(paths) == 1 else None
+
+
 def main():
     p = argparse.ArgumentParser(prog="fxlla-rag")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -716,8 +786,19 @@ def main():
     ev.add_argument("--keep", action="store_true",
                     help="leave the eval knowledge base in place for inspection")
     args = p.parse_args()
-    {"ls": cmd_ls, "rm": cmd_rm, "add": cmd_add, "search": cmd_search,
-     "reindex": cmd_reindex, "eval": cmd_eval}[args.cmd](args)
+    run = {"ls": cmd_ls, "rm": cmd_rm, "add": cmd_add, "search": cmd_search,
+           "reindex": cmd_reindex, "eval": cmd_eval}[args.cmd]
+    base = {"kb": args.name} if hasattr(args, "name") else {}
+    defaults = {
+        "search": dict(base, hits=0, top_score=None, embed_cold=False),
+        "add": dict(base, source=_add_source(args), chunks_added=0),
+        "rm": dict(base, source=None),
+    }.get(args.cmd)
+    if defaults is None:
+        run(args)
+        return
+    with _recorded(args.cmd, defaults):
+        run(args)
 
 
 if __name__ == "__main__":

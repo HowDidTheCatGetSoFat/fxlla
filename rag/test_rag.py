@@ -5,6 +5,7 @@ import io
 import json
 import os
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -685,6 +686,165 @@ class TestEvalSet(unittest.TestCase):
     def test_every_query_expects_something(self):
         for item in self.spec["queries"]:
             self.assertTrue(item["expect"], item["q"])
+
+
+class _FakeEmbedder:
+    """Stands in for Embedder: no server, a fixed 3-wide vector per text."""
+    started = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        pass
+
+    def embed(self, texts):
+        return [[1.0, 0.0, 0.5] for _ in texts]
+
+
+class _FakeColdEmbedder(_FakeEmbedder):
+    started = True
+
+
+class TestKbEvents(unittest.TestCase):
+    QUERY = "zebra-unique-query-text"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.state = os.path.join(self.tmp, "state")
+        self.saved = (core.KB_DIR, core.DB_PATH, core.Embedder,
+                      os.environ.get("FXLLA_STATE_DIR"),
+                      os.environ.pop("FXLLA_CALLER", None))
+        core.KB_DIR = os.path.join(self.tmp, "kb")
+        core.DB_PATH = os.path.join(core.KB_DIR, "kb.db")
+        core.Embedder = _FakeEmbedder
+        os.environ["FXLLA_STATE_DIR"] = self.state
+        self.doc = os.path.join(self.tmp, "notes.txt")
+        with open(self.doc, "w") as f:
+            f.write("alpha beta gamma " * 20)
+
+    def tearDown(self):
+        core.KB_DIR, core.DB_PATH, core.Embedder = self.saved[:3]
+        for key, val in (("FXLLA_STATE_DIR", self.saved[3]),
+                         ("FXLLA_CALLER", self.saved[4])):
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+
+    def _main(self, *argv):
+        out = io.StringIO()
+        saved = sys.argv
+        sys.argv = ["core.py"] + list(argv)
+        code = None
+        try:
+            with contextlib.redirect_stdout(out):
+                try:
+                    core.main()
+                except SystemExit as e:
+                    code = e.code
+        finally:
+            sys.argv = saved
+        return out.getvalue(), code
+
+    def _events(self):
+        path = os.path.join(self.state, "kb.jsonl")
+        if not os.path.exists(path):
+            return []
+        with open(path) as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+    def test_add_search_rm_each_write_one_record(self):
+        self._main("add", "k1", self.doc)
+        self._main("search", "k1", self.QUERY, "--json")
+        self._main("rm", "k1")
+        add, search, rm = self._events()
+        self.assertEqual((add["kind"], add["kb"], add["source"], add["ok"]),
+                         ("add", "k1", "notes.txt", True))
+        self.assertGreater(add["chunks_added"], 0)
+        self.assertEqual((search["kind"], search["kb"], search["ok"]),
+                         ("search", "k1", True))
+        self.assertGreater(search["hits"], 0)
+        self.assertIsNotNone(search["top_score"])
+        self.assertFalse(search["embed_cold"])
+        self.assertIsNone(search["error"])
+        self.assertEqual((rm["kind"], rm["kb"], rm["source"], rm["ok"]),
+                         ("rm", "k1", None, True))
+        for rec in (add, search, rm):
+            self.assertIsInstance(rec["duration_ms"], int)
+            self.assertEqual(rec["caller"], "cli")
+            self.assertIn("ts", rec)
+
+    def test_embed_cold_reflects_a_server_this_process_started(self):
+        self._main("add", "k1", self.doc)
+        core.Embedder = _FakeColdEmbedder
+        self._main("search", "k1", self.QUERY, "--json")
+        self.assertTrue(self._events()[-1]["embed_cold"])
+
+    def test_embedder_started_is_false_until_it_spawns_a_server(self):
+        self.assertIs(self.saved[2].started, False)
+
+    def test_failure_is_recorded_and_exit_code_kept(self):
+        _out, code = self._main("search", "empty", self.QUERY, "--json")
+        self.assertIn("empty", str(code))
+        rec = self._events()[-1]
+        self.assertFalse(rec["ok"])
+        self.assertEqual((rec["kind"], rec["hits"]), ("search", 0))
+        self.assertIsNone(rec["top_score"])
+        self.assertTrue(rec["error"].startswith("knowledge base"))
+        self.assertLessEqual(len(rec["error"]), 200)
+
+    def test_error_is_first_line_capped_and_home_free(self):
+        home = os.path.expanduser("~")
+        saved = core.cmd_rm
+
+        def boom(_a):
+            sys.exit("first %s/x\n" % home + "second line" + "y" * 400)
+        core.cmd_rm = boom
+        try:
+            self._main("rm", "k1")
+        finally:
+            core.cmd_rm = saved
+        err = self._events()[-1]["error"]
+        self.assertNotIn("second", err)
+        self.assertNotIn(home, err)
+        self.assertLessEqual(len(err), 200)
+
+    def test_no_query_text_in_the_log(self):
+        self._main("add", "k1", self.doc)
+        self._main("search", "k1", self.QUERY, "--json")
+        self._main("search", "nokb", self.QUERY)
+        with open(os.path.join(self.state, "kb.jsonl")) as f:
+            raw = f.read()
+        self.assertNotIn(self.QUERY, raw)
+        self.assertNotIn("alpha beta", raw)
+        self.assertNotIn(self.tmp, raw)
+
+    def test_printed_output_is_unchanged_by_telemetry(self):
+        self._main("add", "k1", self.doc)
+        on, code_on = self._main("search", "k1", self.QUERY, "--json")
+        # A state dir that is a regular file makes every append fail.
+        blocker = os.path.join(self.tmp, "blocker")
+        open(blocker, "w").close()
+        os.environ["FXLLA_STATE_DIR"] = blocker
+        off, code_off = self._main("search", "k1", self.QUERY, "--json")
+        self.assertEqual(on, off)
+        self.assertEqual(code_on, code_off)
+        self.assertTrue(json.loads(on))
+
+    def test_mcp_search_is_attributed_to_mcp(self):
+        # Real subprocess path: an empty base exits before any embedder starts.
+        env = dict(os.environ, FXLLA_STORE=self.tmp)
+        env.pop("FXLLA_CALLER", None)
+        req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": "rag_search",
+                                     "arguments": {"kb": "none", "query": "q"}}})
+        proc = subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(core.__file__), "rag_mcp.py")],
+            input=req + "\n", capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("error:", proc.stdout)
+        self.assertEqual(self._events()[-1]["caller"], "mcp")
 
 
 class TestMCP(unittest.TestCase):
