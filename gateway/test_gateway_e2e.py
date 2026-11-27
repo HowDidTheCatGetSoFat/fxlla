@@ -479,12 +479,14 @@ class TestGatewayE2E(unittest.TestCase):
         path = os.path.join(d, rec["id"] + ".json")
         with open(path, "w") as f:
             json.dump(rec, f)
+        real = gw.TOOLS
+        # gw may have been imported by another suite with a different store.
+        gw.TOOLS = gw.tools_reader.ToolsReader(_STORE)
         try:
-            gw.TOOLS._cache.clear()
             _, raw = self._monitor()
         finally:
             os.remove(path)
-            gw.TOOLS._cache.clear()
+            gw.TOOLS = real
         self.assertNotIn(b"DISTINCT-PROMPT-QZX", raw)
         self.assertNotIn(b"fake-home-xyz", raw)
         recent = json.loads(raw)["media"]["recent"]
