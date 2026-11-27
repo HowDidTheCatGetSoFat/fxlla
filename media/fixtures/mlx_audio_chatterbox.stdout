@@ -1,0 +1,6 @@
+Loaded multilingual tokenizer (MTLTokenizer)
+Loaded English tokenizer (EnTokenizer)
+Loading S3Tokenizer from mlx-community/S3TokenizerV2...
+Loaded S3Tokenizer weights
+Warning: conds.safetensors not found - ref_audio will be required
+/store/media/cap-voice.wav

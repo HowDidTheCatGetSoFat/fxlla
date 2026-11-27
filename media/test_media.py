@@ -5,6 +5,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -609,6 +610,27 @@ class TestQualityGate(unittest.TestCase):
         media._check_quality("image", self.png, boom)
 
 
+def _fake_popen(returncode, stdout, stderr):
+    """A stand-in for subprocess.Popen as jobs.run uses it: stdout is a pipe,
+    stderr is a file the worker handed over."""
+    import io
+
+    class _Proc(object):
+        def __init__(self, cmd, **kw):
+            self.returncode = returncode
+            self.stdout = io.BytesIO(stdout.encode())
+            if kw.get("stderr") not in (None, subprocess.PIPE, subprocess.STDOUT):
+                kw["stderr"].write(stderr.encode())
+                kw["stderr"].flush()
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+    return _Proc
+
+
 class TestJobs(unittest.TestCase):
     # Exercises the job lifecycle against a stand-in generator, so no model is
     # loaded: jobs.run shells out to jobs.GENERATE, which the tests replace.
@@ -682,6 +704,20 @@ class TestJobs(unittest.TestCase):
     def test_cancel_marks_cancelled(self):
         rec = self._record(status="queued")
         self.assertEqual(jobs.cancel(rec["id"])["status"], "cancelled")
+
+    def test_cancelling_a_sync_record_signals_only_its_pid(self):
+        # A sync run is not a session leader: its process group is the
+        # caller's shell or MCP server, which must not get the SIGTERM.
+        rec = self._record(status="running", pid=os.getpid(), job=False)
+        calls = []
+        saved = (jobs.os.killpg, jobs.os.kill)
+        self.addCleanup(lambda: (setattr(jobs.os, "killpg", saved[0]),
+                                 setattr(jobs.os, "kill", saved[1])))
+        jobs.os.killpg = lambda *a: calls.append(("killpg", a))
+        jobs.os.kill = lambda pid, sig: calls.append(("kill", (pid, sig)))
+        jobs.cancel(rec["id"])
+        self.assertEqual([c[0] for c in calls if c[0] == "killpg"], [])
+        self.assertIn(("kill", (os.getpid(), signal.SIGTERM)), calls)
 
     def test_cancel_leaves_finished_jobs_alone(self):
         rec = self._record(status="done", output="/tmp/x.png")
@@ -1580,9 +1616,7 @@ class TestBackendWarnings(unittest.TestCase):
                          % (failures, reports))
 
     def test_a_finished_job_carries_them(self):
-        class Proc(object):
-            returncode, stdout = 0, "/out/x.png\n"
-            stderr = "warning: --steps is ignored; presets define it.\n"
+        err = "fxlla-warning: --steps is ignored; presets define it.\n"
 
         jobs_dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, jobs_dir, True)
@@ -1590,8 +1624,9 @@ class TestBackendWarnings(unittest.TestCase):
         self.addCleanup(setattr, jobs, "JOBS_DIR", saved_dir)
         saved_notify, jobs.notify = jobs.notify, lambda rec: None
         self.addCleanup(setattr, jobs, "notify", saved_notify)
-        saved_run, jobs.subprocess.run = jobs.subprocess.run, lambda c, **k: Proc()
-        self.addCleanup(setattr, jobs.subprocess, "run", saved_run)
+        saved_run = jobs.subprocess.Popen
+        jobs.subprocess.Popen = _fake_popen(0, "/out/x.png\n", err)
+        self.addCleanup(setattr, jobs.subprocess, "Popen", saved_run)
         jobs._write({"id": "1785500000-abcdef", "kind": "image",
                      "status": "queued", "argv": ["image", "x"], "summary": "x",
                      "output": None, "error": None, "pid": None,
@@ -2361,10 +2396,6 @@ class TestJobNotification(unittest.TestCase):
 
     def test_the_worker_announces_both_outcomes(self):
         # The notify() calls have to be wired into run(), not merely exist.
-        class Proc(object):
-            def __init__(self, rc, out):
-                self.returncode, self.stdout, self.stderr = rc, out, "boom"
-
         for rc, stdout, expected in ((0, "/out/x.png\n", "done"),
                                      (1, "", "failed")):
             jobs_dir = tempfile.mkdtemp()
@@ -2374,7 +2405,9 @@ class TestJobNotification(unittest.TestCase):
             announced = []
             saved_notify, jobs.notify = jobs.notify, announced.append
             self.addCleanup(setattr, jobs, "notify", saved_notify)
-            jobs.subprocess.run = lambda cmd, **kw: Proc(rc, stdout)
+            saved_popen = jobs.subprocess.Popen
+            jobs.subprocess.Popen = _fake_popen(rc, stdout, "boom")
+            self.addCleanup(setattr, jobs.subprocess, "Popen", saved_popen)
             rec = jobs._write({"id": "1785500000-abcdef", "kind": "image",
                                "status": "queued", "argv": ["image", "x"],
                                "summary": "x", "output": None, "error": None,
@@ -2817,6 +2850,510 @@ class TestSeveralCacheRoots(unittest.TestCase):
         self.assertIn("org/LoRA-A", names)
         self.assertIn("org/LoRA-B", names)
         self.assertEqual(names.count("org/LoRA-Dup"), 1)
+
+
+
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+
+
+def _fixture(name):
+    with open(os.path.join(FIXTURES, name), "rb") as fh:
+        return fh.read().decode("ascii")
+
+
+class TestProgressParse(unittest.TestCase):
+    # Parsed on text captured from real runs (see media/fixtures), so no backend
+    # has to be installed. A tool that prints no parseable progress gets none.
+    def _steps(self, text):
+        out = []
+        for line in media.split_lines(text):
+            found = media.parse_progress(line)
+            if found:
+                out.append(found)
+        return out
+
+    def test_mflux_bar_from_a_real_run(self):
+        steps = self._steps(_fixture("mflux_zimage_256_2steps.stderr"))
+        self.assertEqual(steps, [(0, 2), (1, 2), (2, 2), (2, 2)])
+
+    def test_mlx_audio_prints_no_generation_progress(self):
+        # Its only bars are weight fetches ("Fetching 3 files"), which say
+        # nothing about the render, so no progress is reported.
+        self.assertEqual(self._steps(_fixture("mlx_audio_chatterbox.stderr")), [])
+        self.assertEqual(self._steps(_fixture("mlx_audio_chatterbox.stdout")), [])
+
+    def test_ltx_bar_format_unverified_against_a_live_run(self):
+        steps = self._steps(_fixture("ltx_denoise_UNVERIFIED.stderr"))
+        self.assertEqual(steps, [(0, 8), (4, 8), (8, 8)])
+
+    def test_a_described_denoising_bar(self):
+        self.assertEqual(media.parse_progress(
+            "Denoising (res2s guided):  25%|##5       | 2/8 [00:20<01:00]"), (2, 8))
+
+    def test_step_n_of_m_text(self):
+        self.assertEqual(media.parse_progress("step 3/8"), (3, 8))
+        self.assertEqual(media.parse_progress("Step 3/8 done"), (3, 8))
+
+    def test_things_that_are_not_progress(self):
+        for line in ("", "INFO: 3/5 files ready", "date 12/31",
+                     "Downloading shards: 100%|##########| 4/4 [00:01<00:00]",
+                     "Loading weights:  50%|#####     | 2/4 [00:00<00:00]",
+                     "step 9/8", "step 1/0", "Fetching 3 files: 1/3"):
+            self.assertIsNone(media.parse_progress(line), line)
+
+
+class TestSplitLines(unittest.TestCase):
+    def test_splits_on_cr_and_lf(self):
+        self.assertEqual(media.split_lines("a\rb\nc\r\nd"), ["a", "b", "c", "d"])
+
+    def test_the_stream_splitter_handles_chunk_boundaries(self):
+        got = []
+        sp = media.LineSplitter(got.append)
+        for chunk in (b" 50%|##  ", b"| 1/2 [x]\r", b"100%|", b"##| 2/2\n", b"tail"):
+            sp.feed(chunk)
+        sp.close()
+        self.assertEqual(got, [" 50%|##  | 1/2 [x]", "100%|##| 2/2", "tail"])
+
+    def test_a_multibyte_character_split_across_chunks_survives(self):
+        got = []
+        sp = media.LineSplitter(got.append)
+        data = "caf\u00e9\n".encode("utf-8")
+        sp.feed(data[:4])
+        sp.feed(data[4:])
+        sp.close()
+        self.assertEqual(got, ["caf\u00e9"])
+
+
+class TestRssUnits(unittest.TestCase):
+    def test_macos_reports_bytes(self):
+        self.assertEqual(media.rss_mb(3 * 1024 * 1024 * 1024, "darwin"), 3072)
+
+    def test_linux_reports_kilobytes(self):
+        self.assertEqual(media.rss_mb(3 * 1024 * 1024, "linux"), 3072)
+
+    def test_zero_is_unknown(self):
+        self.assertIsNone(media.rss_mb(0, "darwin"))
+
+
+CHILD = (
+    "import sys, time\n"
+    "sys.stderr.write('x.py:1: UserWarning: heads up\\n')\n"
+    "for i in range(3):\n"
+    "    sys.stderr.write('\\r%3d%%|##| %d/2 [00:00<?]' % (i * 50, i))\n"
+    "    sys.stderr.flush()\n"
+    "sys.stderr.write('\\n')\n"
+    "print('/out/x.png')\n"
+)
+
+
+class TestRunBackend(unittest.TestCase):
+    def setUp(self):
+        self.cmd = [sys.executable, "-c", CHILD]
+
+    def test_returns_what_subprocess_run_returned(self):
+        # The captured text is the contract every caller depends on: warnings,
+        # the failure message and the output path all come out of it.
+        ref = subprocess.run(self.cmd, capture_output=True, text=True)
+        got = media.run_backend(self.cmd, env=dict(os.environ))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (ref.returncode, ref.stdout, ref.stderr))
+        self.assertEqual(media.backend_warnings(got.stderr), ["heads up"])
+
+    def test_the_exit_code_is_passed_on(self):
+        got = media.run_backend([sys.executable, "-c", "import sys; sys.exit(3)"],
+                                env=dict(os.environ))
+        self.assertEqual(got.returncode, 3)
+
+    def test_each_redraw_reaches_the_tracker(self):
+        seen = []
+
+        class T(object):
+            def progress(self, step, total):
+                seen.append((step, total))
+        media.run_backend(self.cmd, env=dict(os.environ), tracker=T())
+        self.assertEqual(seen, [(0, 2), (1, 2), (2, 2)])
+
+    def test_job_mode_relays_the_output_to_our_stderr(self):
+        buf = io.StringIO()
+        saved = os.environ.get("FXLLA_JOB_ID")
+        os.environ["FXLLA_JOB_ID"] = "1785500000-abcdef"
+        try:
+            with contextlib.redirect_stderr(buf):
+                media.run_backend(self.cmd, env=dict(os.environ))
+        finally:
+            if saved is None:
+                del os.environ["FXLLA_JOB_ID"]
+            else:
+                os.environ["FXLLA_JOB_ID"] = saved
+        self.assertIn("UserWarning: heads up", buf.getvalue())
+        self.assertIn("/out/x.png", buf.getvalue())
+
+    def test_a_direct_run_prints_nothing_extra(self):
+        buf = io.StringIO()
+        saved = os.environ.pop("FXLLA_JOB_ID", None)
+        try:
+            with contextlib.redirect_stderr(buf):
+                media.run_backend(self.cmd, env=dict(os.environ))
+        finally:
+            if saved is not None:
+                os.environ["FXLLA_JOB_ID"] = saved
+        self.assertEqual(buf.getvalue(), "")
+
+
+class _RecordCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self._saved = jobs.JOBS_DIR
+        jobs.JOBS_DIR = os.path.join(self.tmp, "jobs")
+        self.addCleanup(setattr, jobs, "JOBS_DIR", self._saved)
+        self._env = {k: os.environ.get(k) for k in ("FXLLA_JOB_ID", "FXLLA_CALLER")}
+        for k in self._env:
+            os.environ.pop(k, None)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        for k, v in self._env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _args(self, **kw):
+        base = dict(cmd="image", prompt="a SECRET prompt", model=None, steps=None,
+                    width=None, height=None, text=None, image=None)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+
+class TestRunFacts(_RecordCase):
+    def test_what_was_asked_is_recorded(self):
+        facts = media.run_facts(self._args(model="krea2", steps=8, width=256,
+                                           height=384))
+        self.assertEqual(facts, {"model": "krea2", "steps": 8, "width": 256,
+                                 "height": 384})
+
+    def test_an_unset_knob_is_none_not_a_guess(self):
+        facts = media.run_facts(self._args(cmd="video"))
+        self.assertEqual(facts, {"model": None, "steps": None, "width": None,
+                                 "height": None})
+
+    def test_an_image_without_a_model_records_the_one_that_runs(self):
+        self.assertEqual(media.run_facts(self._args())["model"], media.DEFAULT_MODEL)
+
+    def test_voice_and_edit_have_no_canvas(self):
+        facts = media.run_facts(self._args(cmd="voice", model="m"))
+        self.assertEqual(facts["model"], "m")
+        self.assertIsNone(facts["width"])
+
+
+class TestSyncRecord(_RecordCase):
+    def _run(self, fn, **kw):
+        return media.run_tracked(self._args(**kw), fn)
+
+    def test_a_synchronous_run_leaves_a_record(self):
+        seen = {}
+
+        def body(args):
+            seen["rec"] = jobs.listing()[0]
+            media.note_output("/out/x.png")
+        self._run(body, model="krea2", steps=4, width=64, height=64)
+        during = seen["rec"]
+        self.assertFalse(during["job"])
+        self.assertEqual(during["status"], "running")
+        self.assertEqual(during["pid"], os.getpid())
+        self.assertEqual(during["media"], "image")
+        self.assertEqual(during["kind"], "image")
+        self.assertEqual((during["model"], during["steps"], during["width"],
+                          during["height"]), ("krea2", 4, 64, 64))
+        self.assertEqual(during["caller"], "cli")
+        after = jobs.listing()[0]
+        self.assertEqual(after["status"], "done")
+        self.assertEqual(after["output"], "/out/x.png")
+        self.assertIsNotNone(after["finished"])
+        self.assertIsNone(after["error"])
+        self.assertIsNotNone(after["started"])
+
+    def test_the_caller_comes_from_the_environment(self):
+        os.environ["FXLLA_CALLER"] = "mcp"
+        self._run(lambda a: None)
+        self.assertEqual(jobs.listing()[0]["caller"], "mcp")
+
+    def test_a_failure_is_recorded_and_re_raised_unchanged(self):
+        def body(args):
+            raise RuntimeError("x" * 900 + "THE END")
+        with self.assertRaises(RuntimeError) as ctx:
+            self._run(body)
+        self.assertTrue(str(ctx.exception).endswith("THE END"))
+        self.assertEqual(len(str(ctx.exception)), 907)
+        rec = jobs.listing()[0]
+        self.assertEqual(rec["status"], "failed")
+        self.assertEqual(len(rec["error"]), 800)
+        self.assertTrue(rec["error"].endswith("THE END"))
+
+    def test_an_exit_code_passes_through(self):
+        def body(args):
+            sys.exit(2)
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(body)
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(jobs.listing()[0]["status"], "failed")
+
+    def test_a_clean_exit_zero_is_not_a_failure(self):
+        def body(args):
+            sys.exit(0)
+        with self.assertRaises(SystemExit):
+            self._run(body)
+        self.assertEqual(jobs.listing()[0]["status"], "done")
+
+    def test_the_record_carries_peak_rss(self):
+        self._run(lambda a: None)
+        rec = jobs.listing()[0]
+        self.assertIn("peak_rss_mb", rec)
+        self.assertTrue(rec["peak_rss_mb"] is None or rec["peak_rss_mb"] >= 0)
+
+    def test_telemetry_that_cannot_write_never_fails_the_render(self):
+        jobs.JOBS_DIR = os.path.join(self.tmp, "file")
+        open(jobs.JOBS_DIR, "w").close()  # a file where the directory goes
+        ran = []
+        self._run(lambda a: ran.append(1))
+        self.assertEqual(ran, [1])
+
+    def test_the_summary_and_argv_make_the_record_usable_by_timings(self):
+        saved = sys.argv
+        sys.argv = ["generate.py", "image", "p", "--model", "krea2"]
+        self.addCleanup(setattr, sys, "argv", saved)
+        self._run(lambda a: None, prompt="p", model="krea2")
+        rec = jobs.listing()[0]
+        self.assertEqual(rec["argv"], ["image", "p", "--model", "krea2"])
+        self.assertEqual(rec["summary"], "p")
+
+    def test_a_dead_synchronous_run_is_reaped_like_a_job(self):
+        jobs.begin_sync("image", {}, argv=[], summary="")
+        rec = jobs.listing()[0]
+        jobs._update(rec["id"], pid=999999)
+        self.assertEqual(jobs.get(rec["id"])["status"], "failed")
+
+    def test_prune_removes_finished_synchronous_records(self):
+        self._run(lambda a: None)
+        self.assertEqual(jobs.prune(), 1)
+
+
+class TestJobRecordUpdates(_RecordCase):
+    def _job(self):
+        rec = {"id": "1785500000-abcdef", "kind": "image", "media": "image",
+               "job": True, "status": "running", "argv": [], "summary": "",
+               "output": None, "error": None, "pid": os.getpid(), "created": 1.0,
+               "started": 2.0, "finished": None, "log": "", "model": None,
+               "steps": None, "width": None, "height": None,
+               "peak_rss_mb": None, "progress": None, "caller": "cli"}
+        jobs._write(rec)
+        os.environ["FXLLA_JOB_ID"] = rec["id"]
+        return rec["id"]
+
+    def test_a_job_run_updates_its_own_record(self):
+        job_id = self._job()
+        media.run_tracked(self._args(model="krea2", steps=8),
+                          lambda a: media.note_output("/out/x.png"))
+        rec = jobs._read(job_id)
+        self.assertEqual((rec["model"], rec["steps"]), ("krea2", 8))
+        self.assertEqual(rec["status"], "running")  # jobs.run owns transitions
+        self.assertIsNone(rec["finished"])
+        self.assertIn("peak_rss_mb", rec)
+        self.assertEqual(len(jobs.listing()), 1)  # no second record
+
+    def test_status_changes_made_meanwhile_are_not_lost(self):
+        job_id = self._job()
+
+        def body(args):
+            jobs._update(job_id, status="cancelled")
+        media.run_tracked(self._args(), body)
+        self.assertEqual(jobs._read(job_id)["status"], "cancelled")
+
+    def test_progress_is_written_once_per_second_and_only_on_a_new_step(self):
+        job_id = self._job()
+        clock = [100.0]
+        t = media.RunTracker(job_id, False, clock=lambda: clock[0])
+        t.progress(0, 4)
+        self.assertEqual(jobs._read(job_id)["progress"]["step"], 0)
+        clock[0] = 100.2
+        t.progress(1, 4)
+        self.assertEqual(jobs._read(job_id)["progress"]["step"], 0)  # too soon
+        clock[0] = 101.5
+        t.progress(1, 4)
+        self.assertEqual(jobs._read(job_id)["progress"],
+                         {"step": 1, "total": 4, "at": 101.5})
+        before = jobs._read(job_id)["progress"]
+        clock[0] = 103.0
+        t.progress(1, 4)  # same step: no write
+        self.assertEqual(jobs._read(job_id)["progress"], before)
+
+    def test_the_last_step_is_flushed_when_the_run_ends(self):
+        job_id = self._job()
+        clock = [100.0]
+        t = media.RunTracker(job_id, False, clock=lambda: clock[0])
+        t.progress(0, 2)
+        clock[0] = 100.1
+        t.progress(2, 2)
+        t.finish(ok=True)
+        self.assertEqual(jobs._read(job_id)["progress"]["step"], 2)
+
+    def test_no_progress_means_none(self):
+        job_id = self._job()
+        media.run_tracked(self._args(cmd="voice"), lambda a: None)
+        self.assertIsNone(jobs._read(job_id)["progress"])
+
+
+class TestJobWorkerOutput(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self._saved = (jobs.JOBS_DIR, jobs.GENERATE, jobs.notify)
+        jobs.JOBS_DIR = os.path.join(self.tmp, "jobs")
+        jobs.notify = lambda rec: None
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        jobs.JOBS_DIR, jobs.GENERATE, jobs.notify = self._saved
+
+    def _gen(self, body):
+        path = os.path.join(self.tmp, "fake_gen.py")
+        with open(path, "w") as fh:
+            fh.write(body)
+        jobs.GENERATE = path
+
+    def _queued(self):
+        write = jobs._write
+        job_id = jobs.new_id()
+        write({"id": job_id, "kind": "image", "status": "queued", "argv": [],
+             "summary": "", "output": None, "error": None, "pid": None,
+             "created": 1.0, "started": None, "finished": None,
+             "log": jobs.log_path(job_id)})
+        return job_id
+
+    def test_the_generator_gets_its_job_id(self):
+        self._gen("import os\nprint(os.environ['FXLLA_JOB_ID'])\n")
+        job_id = self._queued()
+        jobs.run(job_id)
+        self.assertEqual(jobs._read(job_id)["output"], job_id)
+
+    def test_the_log_gets_the_output_and_is_truncated_at_start(self):
+        self._gen("import sys\nsys.stderr.write('progress line\\n')\n"
+                  "print('/out/x.png')\n")
+        job_id = self._queued()
+        with open(jobs.log_path(job_id), "w") as fh:
+            fh.write("stale content from an earlier life\n")
+        jobs.run(job_id)
+        with open(jobs.log_path(job_id)) as fh:
+            log = fh.read()
+        self.assertIn("progress line", log)
+        self.assertIn("/out/x.png", log)
+        self.assertNotIn("stale", log)
+
+    def test_the_log_fills_while_the_generator_runs(self):
+        # Streamed, not written at exit: a kill -9 or a cancel mid-render
+        # must still leave what the generator had said so far.
+        self._gen("import os, sys, time\n"
+                  "sys.stderr.write('early line\\n'); sys.stderr.flush()\n"
+                  "seen = 'BLIND'\n"
+                  "for _ in range(100):\n"
+                  "    if 'early line' in open(os.environ['TLOG']).read():\n"
+                  "        seen = 'SEEN'; break\n"
+                  "    time.sleep(0.05)\n"
+                  "print(seen)\n")
+        job_id = self._queued()
+        os.environ["TLOG"] = jobs.log_path(job_id)
+        self.addCleanup(os.environ.pop, "TLOG", None)
+        jobs.run(job_id)
+        self.assertEqual(jobs._read(job_id)["output"], "SEEN")
+
+    def test_the_log_interleaves_stdout_and_stderr_in_order(self):
+        self._gen("import sys\n"
+                  "sys.stderr.write('one\\n'); sys.stderr.flush()\n"
+                  "print('two', flush=True)\n"
+                  "import time; time.sleep(0.2)\n"
+                  "sys.stderr.write('three\\n'); sys.stderr.flush()\n"
+                  "print('/out/x.png')\n")
+        job_id = self._queued()
+        jobs.run(job_id)
+        with open(jobs.log_path(job_id)) as fh:
+            lines = fh.read().split()
+        self.assertEqual(lines[:3], ["one", "two", "three"])
+
+    def test_a_generator_that_cannot_start_leaves_its_reason_in_the_log(self):
+        job_id = self._queued()
+        saved = jobs.subprocess.Popen
+        def boom(*a, **k):
+            raise OSError("no such interpreter")
+        jobs.subprocess.Popen = boom
+        self.addCleanup(setattr, jobs.subprocess, "Popen", saved)
+        jobs.run(job_id)
+        self.assertEqual(jobs._read(job_id)["status"], "failed")
+        with open(jobs.log_path(job_id)) as fh:
+            self.assertIn("no such interpreter", fh.read())
+
+    def test_a_lowercase_backend_warning_line_is_not_a_job_warning(self):
+        # In job mode the backend's raw output is relayed into the stream
+        # jobs.run reads; only the generator's own marked lines count.
+        self._gen("import sys\n"
+                  "sys.stderr.write('warning: noise\\n')\n"
+                  "sys.stderr.write('fxlla-warning: real\\n')\n"
+                  "print('/out/x.png')\n")
+        job_id = self._queued()
+        jobs.run(job_id)
+        self.assertEqual(jobs._read(job_id)["warnings"], ["real"])
+
+    def test_the_generator_marks_its_warnings_only_in_a_job(self):
+        import io, contextlib
+        err = "UserWarning: --steps is ignored\n"
+        for job, expected in (("1", "fxlla-warning: --steps is ignored\n"),
+                              (None, "warning: --steps is ignored\n")):
+            saved = os.environ.get("FXLLA_JOB_ID")
+            if job:
+                os.environ["FXLLA_JOB_ID"] = job
+            else:
+                os.environ.pop("FXLLA_JOB_ID", None)
+            try:
+                buf = io.StringIO()
+                with contextlib.redirect_stderr(buf):
+                    media._report_warnings(err)
+            finally:
+                if saved is None:
+                    os.environ.pop("FXLLA_JOB_ID", None)
+                else:
+                    os.environ["FXLLA_JOB_ID"] = saved
+            self.assertEqual(buf.getvalue(), expected)
+
+    def test_error_is_still_the_last_800_characters(self):
+        self._gen("import sys\nsys.stderr.write('A' * 2000 + 'THE END')\n"
+                  "sys.exit(1)\n")
+        job_id = self._queued()
+        jobs.run(job_id)
+        err = jobs._read(job_id)["error"]
+        self.assertEqual(len(err), 800)
+        self.assertTrue(err.endswith("THE END"))
+
+    def test_warnings_are_found_and_not_duplicated(self):
+        self._gen("import sys\nsys.stderr.write('fxlla-warning: one\\nfxlla-warning: one\\n')\n"
+                  "print('/out/x.png')\n")
+        job_id = self._queued()
+        jobs.run(job_id)
+        self.assertEqual(jobs._read(job_id)["warnings"], ["one"])
+
+    def test_a_submitted_job_has_the_new_fields(self):
+        saved_popen = jobs.subprocess.Popen
+        jobs.subprocess.Popen = lambda *a, **k: type("P", (), {"pid": 1})()
+        self.addCleanup(setattr, jobs.subprocess, "Popen", saved_popen)
+        os.environ["FXLLA_CALLER"] = "mcp"
+        self.addCleanup(os.environ.pop, "FXLLA_CALLER", None)
+        rec = jobs.submit("video", ["video", "p"], "p")
+        self.assertTrue(rec["job"])
+        self.assertEqual(rec["media"], "video")
+        self.assertEqual(rec["kind"], "video")
+        self.assertEqual(rec["caller"], "mcp")
+        for key in ("model", "steps", "width", "height", "peak_rss_mb", "progress"):
+            self.assertIn(key, rec)
+            self.assertIsNone(rec[key])
 
 
 if __name__ == "__main__":
