@@ -58,6 +58,23 @@ class TestStateDir(Base):
 
 
 class TestAppend(Base):
+    def test_a_short_write_is_completed(self):
+        real = os.write
+        calls = []
+
+        def short_once(fd, data):
+            calls.append(len(data))
+            if len(calls) == 1:
+                return real(fd, bytes(data[:5]))
+            return real(fd, data)
+        with mock.patch.object(ev.os, "write", short_once):
+            ev.append("kb", {"kind": "search", "kb": "x" * 40})
+        self.assertGreater(len(calls), 1)
+        with open(self.path(), "rb") as f:
+            lines = f.read().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0])["kb"], "x" * 40)
+
     def test_adds_ts_and_caller(self):
         ev.append("kb", {"kind": "search"})
         rec = ev.read_tail("kb")[0]

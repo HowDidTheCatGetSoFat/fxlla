@@ -42,7 +42,15 @@ def append(stream, record):
             pass
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
-            os.write(fd, data)
+            # A short write would leave a torn line; keep going until the
+            # whole buffer is out. A hard error still raises (read_tail skips
+            # whatever torn line that leaves).
+            view = memoryview(data)
+            while view:
+                n = os.write(fd, view)
+                if n <= 0:
+                    raise OSError("write made no progress")
+                view = view[n:]
         finally:
             os.close(fd)
     except Exception as e:
